@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- Plantilla de la imagen social (1280×640) y del banner del README (1280×320). Se renderiza con
+     Chrome sin interfaz: ver assets/src/render.ps1. Colores tomados del logo. -->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --green: #329C32; --blue: #014A94; --pink: #C887B9; --ink: #1d2433; --muted: #5b6475; }
+  * { margin: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: var(--h); overflow: hidden; }
+  body {
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background: #fff;
+    display: flex; align-items: center; justify-content: center; gap: var(--gap);
+    position: relative;
+  }
+  body::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 10px;
+    background: linear-gradient(90deg, var(--blue) 0 60%, var(--green) 60% 90%, var(--pink) 90%); }
+  img { width: var(--logo); height: var(--logo); }
+  .text { display: flex; flex-direction: column; gap: var(--tgap); }
+  h1 { font-size: var(--title); font-weight: 700; color: var(--blue); letter-spacing: -0.02em; line-height: 1; }
+  h1 span { color: var(--green); }
+  .sub { font-size: var(--sub); color: var(--ink); font-weight: 500; }
+  .meta { display: flex; align-items: center; gap: 14px; font-size: var(--small); color: var(--muted); }
+  .pill { border: 2px solid var(--pink); color: #8E4F80; background: #FAF1F7; border-radius: 999px; padding: 4px 16px; font-weight: 600; }
+  body.social { --h: 640px; --gap: 64px; --logo: 400px; --title: 104px; --sub: 40px; --small: 26px; --tgap: 22px; }
+  body.banner { --h: 320px; padding-bottom: 10px; --gap: 48px; --logo: 280px; --title: 88px; --sub: 34px; --small: 22px; --tgap: 16px; }
+</style>
+</head>
+<body>
+<img src="../logo.png" alt="">
+<div class="text">
+  <h1>UdeSA <span>MCP</span></h1>
+  <p class="sub">Campus Virtual · Moodle</p>
+  <p class="meta"><span class="pill">No oficial</span><span>Tus cursos, con lectura y escritura según tu rol</span></p>
+</div>
+<script>document.body.className = location.hash.slice(1) || "social";</script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Ejercicio de Python</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<main>
+  <h1 id="title">Ejercicio de Python</h1>
+  <div id="statement" class="statement"></div>
+  <label for="code" class="sr-only">Tu código</label>
+  <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+  <div class="actions">
+    <button id="run" type="button" disabled>Cargando Python…</button>
+    <button id="reset" type="button" class="secondary">Volver al código inicial</button>
+    <span id="score" class="score" aria-live="polite"></span>
+  </div>
+  <section id="results" aria-live="polite"></section>
+  <details id="stdout-box" hidden><summary>Salida (print)</summary><pre id="stdout"></pre></details>
+  <p id="error" class="error" hidden></p>
+</main>
+<script src="./app.js" type="module"></script>
+</body>
+</html>

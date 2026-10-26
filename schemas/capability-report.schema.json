@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Campus MCP - reporte de capacidades propuesto",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "report_kind",
+    "profile_id",
+    "site_url",
+    "observed_at",
+    "identity_status",
+    "moodle_release",
+    "moodle_version",
+    "allowed_course_ids",
+    "capabilities",
+    "warnings",
+    "service_function_inventory"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "report_kind": {
+      "enum": [
+        "template_not_tested",
+        "runtime_observation"
+      ]
+    },
+    "profile_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "site_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "observed_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "identity_status": {
+      "enum": [
+        "unverified",
+        "verified"
+      ]
+    },
+    "moodle_release": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "moodle_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "allowed_course_ids": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "uniqueItems": true
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "required_functions",
+          "service_listing",
+          "implementation",
+          "local_policy",
+          "context_check"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "required_functions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "service_listing": {
+            "enum": [
+              "listed",
+              "not_listed",
+              "unknown"
+            ]
+          },
+          "implementation": {
+            "enum": [
+              "implemented",
+              "not_implemented"
+            ]
+          },
+          "local_policy": {
+            "enum": [
+              "allow_read",
+              "blocked",
+              "future_opt_in"
+            ]
+          },
+          "context_check": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "course_id",
+              "checked_at"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "not_tested",
+                  "allowed",
+                  "denied",
+                  "inconclusive",
+                  "error"
+                ]
+              },
+              "course_id": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "checked_at": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "error_code": {
+                "type": "string"
+              }
+            }
+          },
+          "transport": {
+            "enum": [
+              "rest",
+              "web"
+            ]
+          },
+          "context_checks": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "status",
+                "course_id",
+                "checked_at"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "not_tested",
+                    "allowed",
+                    "denied",
+                    "inconclusive",
+                    "error"
+                  ]
+                },
+                "course_id": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "checked_at": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "error_code": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "service_function_inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "functions",
+        "download_files",
+        "upload_files"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "unknown",
+            "observed"
+          ]
+        },
+        "functions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "component_version"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "component_version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "download_files": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "upload_files": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

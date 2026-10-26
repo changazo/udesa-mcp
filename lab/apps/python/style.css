@@ -1,0 +1,22 @@
+:root { --fg: #1d2433; --muted: #5b6475; --ok: #1a7f37; --bad: #b42318; --bg: #fff; --panel: #f4f6f9; --accent: #0b5cad; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e6e9ef; --muted: #9aa3b2; --ok: #4ac26b; --bad: #ff7b72; --bg: #14171c; --panel: #1f242c; --accent: #6cb6ff; } }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); }
+main { max-width: 52rem; margin: 0 auto; padding: 1rem; }
+h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
+.statement { white-space: pre-wrap; line-height: 1.5; margin-bottom: .75rem; }
+.statement code { background: var(--panel); padding: 0 .25rem; border-radius: 4px; }
+textarea { width: 100%; min-height: 14rem; font: 14px/1.45 ui-monospace, "Cascadia Code", Consolas, monospace; padding: .75rem; border: 1px solid #c7ccd6; border-radius: 8px; background: var(--panel); color: var(--fg); tab-size: 4; resize: vertical; }
+.actions { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .75rem 0; }
+button { font: inherit; padding: .5rem 1rem; border-radius: 8px; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
+button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+button:disabled { opacity: .6; cursor: wait; }
+.score { font-weight: 600; }
+.test { padding: .5rem .75rem; border-radius: 8px; background: var(--panel); margin-bottom: .4rem; font-family: ui-monospace, Consolas, monospace; font-size: 13px; white-space: pre-wrap; }
+.test.ok { border-left: 4px solid var(--ok); }
+.test.bad { border-left: 4px solid var(--bad); }
+.error { color: var(--bad); white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+pre { white-space: pre-wrap; background: var(--panel); padding: .5rem; border-radius: 8px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.banner { background: var(--panel); padding: .5rem .75rem; border-radius: 8px; font-size: .9rem; }
+.banner:empty { display: none; }

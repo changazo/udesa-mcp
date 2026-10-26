@@ -1,0 +1,38 @@
+{
+  "name": "udesa-campus-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP no oficial para el Campus Virtual (Moodle) de UdeSA: lecturas y escrituras, local (STDIO) o remoto privado (Vercel).",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "campus": "build/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "campus": "node build/cli.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "@napi-rs/keyring": "2.1.0",
+    "jose": "6.2.12",
+    "pdfjs-dist": "6.4.299",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/changazo/udesa-mcp.git"
+  }
+}

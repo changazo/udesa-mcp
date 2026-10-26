@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "udesa-docente",
+  "base_url": "https://campusvirtual.udesa.edu.ar",
+  "web_login_url": "https://campusvirtual.udesa.edu.ar/login/index.php?loginredirect=1",
+  "service": "moodle_mobile_app",
+  "course_scope": "enrolled",
+  "allowed_course_ids": [],
+  "teacher_role_shortnames": [
+    "editingteacher",
+    "teacher"
+  ],
+  "excluded_course_ids": [],
+  "announcement_forum_id": null,
+  "preferred_auth_method": "native",
+  "read_only": true,
+  "store_password": false,
+  "secret_backend": "os_keyring",
+  "timezone": "America/Argentina/Buenos_Aires",
+  "limits": {
+    "http_timeout_seconds": 30,
+    "max_concurrent_requests": 2,
+    "max_pages_per_request": 10,
+    "max_file_bytes": 31457280,
+    "max_text_chars_per_result": 30000
+  },
+  "export_to_repository": false
+}

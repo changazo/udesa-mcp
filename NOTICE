@@ -1,0 +1,12 @@
+udesa-mcp
+Copyright 2026 Juan Cruz Changazo
+
+Este producto incluye fragmentos adaptados de UTN-MCP (Joaquín Peñalva y
+colaboradores, licencia ISC). Detalle en THIRD_PARTY_NOTICES.md y
+LICENSE_UTN_MCP.txt.
+
+MCP no oficial: no está afiliado ni respaldado por la Universidad de San Andrés.
+«UdeSA», «Universidad de San Andrés» y su emblema son marcas de la Universidad de
+San Andrés y no están cubiertas por la licencia Apache-2.0.
+
+Incluye semánticas de bibliotecas H5P (MIT): tests/fixtures/h5p/LICENSE.

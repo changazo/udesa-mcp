@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "profile_kind": "write",
+  "profile_id": "udesa-docente-escritura",
+  "read_profile": "udesa-docente",
+  "read_only": false,
+  "write_policy": {
+    "enabled": true,
+    "sandbox_course_ids": [],
+    "courses": {},
+    "all_courses": ["post_announcement", "reply_forum", "edit_own_post", "pin_lock_discussion", "calendar_event", "grant_extension", "lock_submissions", "submission_comment", "create_assignment", "course_visibility", "move_content", "rename_content", "grade_submission", "take_attendance", "create_attendance", "quiz_override", "create_quiz", "manage_groups", "import_questions", "edit_quiz", "create_content", "edit_activity", "assign_override", "delete_content", "create_section", "grade_forum", "grade_quiz", "manage_activity_entries", "moderate_forum", "manage_gradebook", "delete_student_work", "send_message"],
+    "limits": {
+      "max_items_per_plan": 30,
+      "max_messages_per_plan": 1,
+      "max_actions_per_day": 2000,
+      "max_messages_per_day": 20
+    },
+    "notify_students_default": false,
+    "require_out_of_band_from_risk": "nunca",
+    "human_in_the_loop_from_risk": "R3",
+    "audit_teacher_text": false,
+    "sandbox_confirmation": "cliente",
+    "allow_participant_notifications": false,
+    "notifiable_user_ids": [],
+    "confirmation": {
+      "dialog": true,
+      "dialog_timeout_seconds": 120
+    }
+  }
+}

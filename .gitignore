@@ -1,0 +1,29 @@
+.env
+.env.*
+!.env.example
+node_modules/
+build/
+.cache/
+.local/
+.reference-downloads/
+*.log
+*.tsbuildinfo
+session.json
+token.json
+credentials.json
+client_secret*.json
+storage-state*.json
+browser-profile/
+.auth/
+*.har
+*.enc
+*.db
+*.db-shm
+*.db-wal
+# No subir snapshots del Campus ni reportes reales automáticamente.
+private-exports/
+reports/live/
+# Vercel
+.vercel/
+# .env.local de `vercel link` (token OIDC) y cualquier otro .env
+.env*

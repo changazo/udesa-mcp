@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
+  "regions": ["gru1"],
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 60,
+      "includeFiles": "{build/**,profiles/**,node_modules/pdfjs-dist/legacy/build/**}"
+    }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api?__route=/$1" }
+  ]
+}

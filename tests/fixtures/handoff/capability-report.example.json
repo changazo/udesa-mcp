@@ -1,0 +1,96 @@
+{
+  "schema_version": "1.0",
+  "report_kind": "template_not_tested",
+  "profile_id": "udesa-curso",
+  "site_url": "https://campusvirtual.udesa.edu.ar",
+  "observed_at": null,
+  "identity_status": "unverified",
+  "moodle_release": null,
+  "moodle_version": null,
+  "allowed_course_ids": [
+    12345
+  ],
+  "capabilities": [
+    {
+      "name": "read_course",
+      "required_functions": [
+        "core_course_get_contents"
+      ],
+      "service_listing": "unknown",
+      "implementation": "not_implemented",
+      "local_policy": "allow_read",
+      "context_check": {
+        "status": "not_tested",
+        "course_id": 12345,
+        "checked_at": null
+      }
+    },
+    {
+      "name": "read_forums",
+      "required_functions": [
+        "mod_forum_get_forums_by_courses",
+        "mod_forum_get_forum_discussions",
+        "mod_forum_get_discussion_posts"
+      ],
+      "service_listing": "unknown",
+      "implementation": "not_implemented",
+      "local_policy": "allow_read",
+      "context_check": {
+        "status": "not_tested",
+        "course_id": 12345,
+        "checked_at": null
+      }
+    },
+    {
+      "name": "read_assignments",
+      "required_functions": [
+        "mod_assign_get_assignments"
+      ],
+      "service_listing": "unknown",
+      "implementation": "not_implemented",
+      "local_policy": "allow_read",
+      "context_check": {
+        "status": "not_tested",
+        "course_id": 12345,
+        "checked_at": null
+      }
+    },
+    {
+      "name": "teacher_submissions",
+      "required_functions": [
+        "mod_assign_get_submissions"
+      ],
+      "service_listing": "unknown",
+      "implementation": "not_implemented",
+      "local_policy": "future_opt_in",
+      "context_check": {
+        "status": "not_tested",
+        "course_id": 12345,
+        "checked_at": null
+      }
+    },
+    {
+      "name": "post_announcement",
+      "required_functions": [
+        "mod_forum_add_discussion"
+      ],
+      "service_listing": "unknown",
+      "implementation": "not_implemented",
+      "local_policy": "blocked",
+      "context_check": {
+        "status": "not_tested",
+        "course_id": 12345,
+        "checked_at": null
+      }
+    }
+  ],
+  "warnings": [
+    "Plantilla de hand-off. No se emitió un token ni se consultó la configuración real de UdeSA."
+  ],
+  "service_function_inventory": {
+    "status": "unknown",
+    "functions": [],
+    "download_files": null,
+    "upload_files": null
+  }
+}
