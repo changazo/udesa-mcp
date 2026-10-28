@@ -75,6 +75,8 @@ npm test
 
 Después: iniciá sesión con `auth login` y conectá tu cliente MCP siguiendo [docs/CONFIGURACION_LOCAL.md](docs/CONFIGURACION_LOCAL.md). Para el servidor remoto propio en Vercel: [docs/REMOTO_VERCEL.md](docs/REMOTO_VERCEL.md).
 
+**Sin npm (red que bloquea el registro, o sin ganas de compilar):** bajá el zip precompilado de la [última versión](https://github.com/changazo/udesa-mcp/releases/latest). Trae las dependencias y sirve para Windows, macOS y Linux con Node ≥ 22: [docs/INSTALAR_PAQUETE.md](docs/INSTALAR_PAQUETE.md). Se arma con `node scripts/empaquetar.mjs`.
+
 Los perfiles sirven con cualquier rol. Sus nombres (`udesa-docente`, `docente-lectura`, `docente-completo`) son históricos: `docente-lectura` sólo lee y `docente-completo` además escribe donde tu rol lo permite.
 
 ## Comandos

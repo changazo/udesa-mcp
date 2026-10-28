@@ -29,3 +29,5 @@ reports/live/
 .env*
 __pycache__/
 .pytest_cache/
+# Paquete precompilado (scripts/empaquetar.mjs)
+dist-release/
