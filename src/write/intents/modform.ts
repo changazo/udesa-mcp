@@ -16,6 +16,16 @@ export async function readModForm(ctx: IntentContext, cmid: number, modname: str
 export const fieldOf = (fields: [string, string][], name: string) => fields.find(([n]) => n === name)?.[1];
 
 /**
+ * Valores que ofrece el selector `<select name="…">` de un formulario (las opciones, no el valor actual).
+ * Sin ese selector devuelve []: quien llama tiene que fallar cerrado. Sólo mira el control con ese nombre
+ * exacto (`display` no coincide con `displayopt[…]`).
+ */
+export function offeredOptions(html: string, field: string): string[] {
+    const select = new RegExp(`<select\\b[^>]*\\bname="${field}"[^>]*>([\\s\\S]*?)</select>`).exec(html)?.[1] ?? "";
+    return [...select.matchAll(/<option\b[^>]*\bvalue="([^"]*)"/g)].map((o) => o[1]!);
+}
+
+/**
  * Las imágenes de un editor llegan apuntando a un borrador NUEVO en cada apertura del formulario: se
  * normalizan para que dos lecturas iguales comparen igual.
  */

@@ -7,7 +7,7 @@ import { comparable, toHtml } from "../text.js";
 import type { FormSubmission } from "../web.js";
 import { describeLocalFiles, type PlanFile } from "../files.js";
 import { h5pPackageOf } from "./h5p-package.js";
-import { fieldOf, readModForm } from "./modform.js";
+import { fieldOf, offeredOptions, readModForm } from "./modform.js";
 
 /**
  * W6 · Crear contenido por `/course/modedit.php` (directiva §8.9; ADR-064 y ADR-077):
@@ -132,6 +132,12 @@ async function verify(item: PlanItem, plan: Plan, ctx: IntentContext, known: Rec
         const u = (await t.call("mod_url_get_urls_by_courses", { courseids: [plan.course_id] }, UrlsSchema)).urls.find((y) => y.coursemodule === m.id);
         check("externalurl", x.url, u?.externalurl ?? null);
         checked.push("externalurl");
+        if (x.display !== undefined) {
+            // La presentación no la expone el servicio de URLs: se relee del formulario de edición de la actividad recién creada.
+            const shown = (await readModForm(ctx, m.id, "url")).filter(([n]) => n === "display").map(([, v]) => v).pop() ?? null;
+            check("display", x.display, shown);
+            checked.push("display");
+        }
     } else if (kind === "label") {
         check("text", x.text, comparable(m.description));
         checked.push("text");
@@ -192,6 +198,7 @@ const shape = {
     intro: z.string().max(10_000).optional().describe("Descripción (Markdown); no aplica a etiquetas ni subsecciones."),
     content: z.string().min(1).max(200_000).optional().describe("page: contenido de la página (Markdown)."),
     external_url: z.string().min(1).max(1900).optional().describe("Para type=url: dirección http(s) del enlace."),
+    display: z.enum(["automatic", "embed", "open"]).optional().describe("Para type=url: presentación del enlace (automatic, embed = dentro del Campus, open = en otra página). Sólo si el sitio la ofrece; sin este campo queda la de Moodle."),
     text: z.string().min(1).max(50_000).optional().describe("label: texto de la etiqueta (Markdown)."),
     file_path: z.string().min(1).max(1000).optional().describe("resource: archivo; h5pactivity: paquete .h5p. Ruta ABSOLUTA del archivo local que indicó el humano (sólo servidor local)."),
     file_paths: z.array(z.string().min(1).max(1000)).min(1).max(MAX_FOLDER_FILES).optional().describe("folder: rutas ABSOLUTAS de los archivos locales (hasta 10; sólo servidor local)."),
@@ -207,7 +214,7 @@ const shape = {
 /** Qué parámetro propio exige (o admite) cada tipo. */
 const OWN: Record<Kind, readonly (keyof typeof shape)[]> = {
     page: ["content"],
-    url: ["external_url"],
+    url: ["external_url", "display"],
     label: ["text"],
     resource: ["file_path"],
     forum: ["subscription", "whole_forum_grade"],
@@ -224,7 +231,9 @@ const OWN: Record<Kind, readonly (keyof typeof shape)[]> = {
     subsection: [],
 };
 const REQUIRED: Partial<Record<Kind, keyof typeof shape>> = { page: "content", url: "external_url", label: "text", resource: "file_path", folder: "file_paths", wiki: "first_page_title", choice: "options", choicegroup: "group_ids", h5pactivity: "file_path" };
-const SPECIFIC = ["content", "external_url", "text", "file_path", "file_paths", "options", "first_page_title", "wiki_mode", "group_ids", "subscription", "whole_forum_grade"] as const;
+const SPECIFIC = ["content", "external_url", "display", "text", "file_path", "file_paths", "options", "first_page_title", "wiki_mode", "group_ids", "subscription", "whole_forum_grade"] as const;
+/** Presentación de un enlace: valor público → valor de `RESOURCELIB_DISPLAY_*` que envía el formulario de Moodle. */
+const URL_DISPLAY = { automatic: "0", embed: "1", open: "5" } as const;
 
 export const createContentIntent: WriteIntent<typeof shape> = {
     name: "create_content",
@@ -280,6 +289,15 @@ export const createContentIntent: WriteIntent<typeof shape> = {
             fields.externalurl = u.href;
             expected.url = u.href;
             preview.url = u.href;
+            if (input.display !== undefined) {
+                // Antes del POST: la opción tiene que figurar en el formulario de alta de esta sección (fail-closed).
+                const want = URL_DISPLAY[input.display];
+                const offered = offeredOptions(await ctx.web.readPage("modedit_url_add_form", { add: "url", course: String(input.course_id), section: String(input.section) }), "display");
+                if (!offered.includes(want)) throw new CampusError("WRITE_NOT_ALLOWED", `La presentación «${input.display}» no la ofrece el sitio para un enlace. Opciones ofrecidas: ${offered.join(", ") || "ninguna"}.`);
+                fields.display = want;
+                expected.display = want;
+                preview.display = input.display;
+            }
         } else if (kind === "label") {
             const html = toHtml(input.text!, "markdown");
             const text = comparable(html);

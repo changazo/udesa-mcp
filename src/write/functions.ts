@@ -1489,7 +1489,7 @@ const CONTENT_FORMS: readonly WebFormWriteSpec[] = [
     ...SETTINGS_KINDS.map((kind): WebFormWriteSpec => {
         const defs = settingFields(kind);
         const validator = (d: SettingDef) =>
-            d.control === "select" ? oneOf(...Object.values(d.values ?? {})) : d.control === "int" ? (v: string) => /^-?\d{1,12}$/.test(v) && Number(v) >= (d.min ?? 0) && Number(v) <= (d.max ?? 1e12) : oneOf("0", "1");
+            d.control === "select" ? oneOf(...Object.values(d.values ?? {}), ...(d.restore ?? [])) : d.control === "int" ? (v: string) => /^-?\d{1,12}$/.test(v) && Number(v) >= (d.min ?? 0) && Number(v) <= (d.max ?? 1e12) : oneOf("0", "1");
         return {
             id: `course_modedit_${kind}_update_settings`,
             path: "/course/modedit.php",
@@ -1862,13 +1862,15 @@ export const WRITE_WEB_FORMS: readonly WebFormWriteSpec[] = [
             externalurl: (v) => /^https?:\/\/[^\s<>"]{1,1900}$/.test(v),
             "introeditor[text]": optionalBody(20_000),
             "introeditor[format]": oneOf("1"),
+            // Presentación del enlace (0 automática, 1 incrustada, 5 en otra página). Sólo si se pidió (content.ts).
+            display: oneOf("0", "1", "5"),
             visible: oneOf("0", "1"),
             coursecontentnotification: oneOf("0"),
         },
         required: ["name", "externalurl", "visible", "coursecontentnotification"],
         forced: { coursecontentnotification: "0" },
         omit_when_zero: ["coursecontentnotification"],
-        effects: "Crea un enlace a una URL externa http(s). Sin notificaciones.",
+        effects: "Crea un enlace a una URL externa http(s), con la presentación indicada si se pidió. Sin notificaciones.",
     },
     {
         id: "course_modedit_label_add",
@@ -2356,6 +2358,12 @@ export const WRITE_WEB_READS: Readonly<Record<string, { path: string; query: Rec
         path: "/course/modedit.php",
         query: { update: int },
         effects: "Lectura del formulario de edición de una actividad (descripción, opciones, archivos actuales). Moodle copia los archivos de la actividad a un borrador privado nuevo.",
+    },
+    // Alta de un enlace (URL): sólo para comprobar qué presentaciones ofrece el sitio antes de crearlo. Sección ya verificada.
+    modedit_url_add_form: {
+        path: "/course/modedit.php",
+        query: { add: oneOf("url"), course: int, section: range(0, 200) },
+        effects: "Lectura del formulario de alta de un enlace (opciones de presentación). Moodle no crea la actividad; puede reservar un borrador de archivos vacío.",
     },
     lesson_page_form: {
         path: "/mod/lesson/editpage.php",

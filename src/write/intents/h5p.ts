@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CampusError } from "../../errors.js";
-import { buildContentParams, describeContent, H5pContentSpec, MAIN_LIBRARY, teacherTextOf, type H5pContent } from "../../h5p/content-types.js";
+import { buildContentParams, contentWarnings, describeContent, embedSource, H5pContentSpec, MAIN_LIBRARY, teacherTextOf, type H5pContent } from "../../h5p/content-types.js";
 import { withH5pEditor } from "../../h5p/editor.js";
 import { buildPackage, ContentFactory, fillDefaults, validateParams } from "../../h5p/semantics.js";
 import { describeGeneratedFile } from "../files.js";
@@ -35,7 +35,7 @@ const shape = {
     visible: z.boolean().optional().describe("create: por defecto false (oculta)."),
     course_module_id: z.number().int().positive().optional().describe("replace: cmid de la actividad H5P."),
     content: H5pContentSpec.describe(
-        "Contenido, según type: question_set (questions), course_presentation (slides con blocks), interactive_book (chapters con blocks), interactive_video (video_url, interactions), branching_scenario (nodes: text con next, choice con options; next = id o «end»), dialog_cards (cards front/back), chart (bar|pie, items), timeline (events con date AAAA-MM-DD), accordion (panels) o python_exercise (ejercicio de Python con pruebas automáticas que corre en el navegador: function_name, tests con input y expected; mini-aplicación del laboratorio, ADR-116). Bloques y preguntas: text (markdown), multiple_choice, true_false, drag_words (palabras entre *asteriscos*), fill_blanks (lines con *respuesta*).",
+        "Contenido, según type: question_set (questions), course_presentation (slides con blocks), interactive_book (chapters con blocks), interactive_video (video_url, interactions), branching_scenario (nodes: text con next, choice con options; next = id o «end»), dialog_cards (cards front/back), chart (bar|pie, items), timeline (events con date AAAA-MM-DD), accordion (panels), python_exercise (ejercicio de Python con pruebas automáticas que corre en el navegador: function_name, tests con input y expected; mini-aplicación del laboratorio, ADR-116), iframe_embed (insertar en el curso cualquier página https por un iframe: source_url; el sitio controla el contenido y no recibe la identidad del estudiante). Bloques y preguntas: text (markdown), multiple_choice, true_false, drag_words (palabras entre *asteriscos*), fill_blanks (lines con *respuesta*). Los bloques de código (```python) se muestran como código en los campos que lo admiten; en el resto, como código en línea.",
     ),
 };
 
@@ -76,9 +76,9 @@ async function generate(ctx: IntentContext, courseId: number, spec: H5pContent, 
 
 export const h5pContentIntent: WriteIntent<typeof shape> = {
     name: "h5p_content",
-    title: "Plan: crear o reemplazar contenido H5P generado (cuestionario, presentación, libro, video, escenario ramificado, tarjetas, gráfico, línea de tiempo, acordeón)",
+    title: "Plan: crear o reemplazar contenido H5P generado (cuestionario, presentación, libro, video, escenario ramificado, tarjetas, gráfico, línea de tiempo, acordeón, recurso incrustado)",
     description:
-        "Arma el plan para crear una actividad H5P (o reemplazar el contenido de una existente) a partir de un esquema tipado: Question Set, Course Presentation, Interactive Book, Interactive Video (YouTube o mp4), Branching Scenario, Dialog Cards, Chart, Timeline o Accordion. El MCP genera el paquete con las bibliotecas instaladas en el Campus y lo valida contra su semántica. Funciona también en el remoto. Para EDITAR uno generado por el MCP: campus_get_activity_content devuelve package_content.spec; modificalo y pasalo con operation=replace. Reemplazar borra el paquete anterior (R3, sin deshacer). Requiere la sesión web. No escribe.",
+        "Arma el plan para crear una actividad H5P (o reemplazar el contenido de una existente) a partir de un esquema tipado: Question Set, Course Presentation, Interactive Book, Interactive Video (YouTube o mp4), Branching Scenario, Dialog Cards, Chart, Timeline, Accordion o un recurso incrustado (iframe_embed: cualquier página https). El MCP genera el paquete con las bibliotecas instaladas en el Campus y lo valida contra su semántica. Funciona también en el remoto. Para EDITAR uno generado por el MCP: campus_get_activity_content devuelve package_content.spec; modificalo y pasalo con operation=replace. Reemplazar borra el paquete anterior (R3, sin deshacer). Requiere la sesión web. No escribe.",
     inputShape: shape,
     capability: "create_content",
     synthetic_only: false,
@@ -91,6 +91,8 @@ export const h5pContentIntent: WriteIntent<typeof shape> = {
         const parsed = H5pContentSpec.safeParse(input.content);
         if (!parsed.success) throw new CampusError("WRITE_NOT_ALLOWED", `Contenido H5P inválido: ${parsed.error.issues.map((i) => `${i.path.join(".") || "content"}: ${i.message}`).slice(0, 8).join("; ")}`);
         const spec = parsed.data;
+        // La dirección de un recurso incrustado se valida antes de abrir el editor H5P del Campus.
+        if (spec.type === "iframe_embed") embedSource(spec.source_url);
         // Límite propio de los paquetes generados (el de descargas del perfil no aplica: no se descarga nada).
         const maxBytes = MAX_PACKAGE_BYTES;
         if (input.operation === "create") {
@@ -106,7 +108,7 @@ export const h5pContentIntent: WriteIntent<typeof shape> = {
                 ...draft,
                 summary: `${draft.summary} Contenido H5P generado: ${MAIN_LIBRARY[spec.type].label}.`,
                 payload_preview: { ...draft.payload_preview, h5p: { type: spec.type, library: pkg.main, libraries: pkg.libraries, content: describeContent(spec), package: { filename: file.filename, bytes: file.size, sha256: file.sha256 } } },
-                warnings: [...draft.warnings, "El paquete lo genera el MCP con las bibliotecas instaladas; el Campus lo despliega al abrirlo por primera vez."],
+                warnings: [...draft.warnings, "El paquete lo genera el MCP con las bibliotecas instaladas; el Campus lo despliega al abrirlo por primera vez.", ...contentWarnings(spec)],
                 teacher_text: { ...draft.teacher_text, h5p: teacherTextOf(spec) },
             };
         }
@@ -126,6 +128,7 @@ export const h5pContentIntent: WriteIntent<typeof shape> = {
             capability: "edit_activity",
             summary: `Reemplazar el contenido H5P de «${m.name ?? m.id}» por un ${MAIN_LIBRARY[spec.type].label} generado.`,
             payload_preview: { ...draft.payload_preview, h5p: { type: spec.type, library: pkg.main, libraries: pkg.libraries, content: describeContent(spec) } },
+            warnings: [...draft.warnings, ...contentWarnings(spec)],
             teacher_text: { h5p: teacherTextOf(spec) },
         };
     },

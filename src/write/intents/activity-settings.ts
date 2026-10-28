@@ -4,7 +4,7 @@ import { GroupingsSchema, GroupsSchema } from "../../moodle/schemas.js";
 import type { IntentContext, Interpretation, ItemVerification, Presence, WriteIntent } from "../intent.js";
 import type { Difference, Plan, PlanDraft, PlanItem } from "../plan.js";
 import { COMMON_SETTINGS, KIND_SETTINGS, SETTINGS_KINDS, type Control, type SettingDef } from "../settings-catalog.js";
-import { readModForm } from "./modform.js";
+import { offeredOptions, readModForm } from "./modform.js";
 import { parseLocalDateTime } from "./w2.js";
 
 /**
@@ -194,6 +194,11 @@ async function build(input: Req, ctx: IntentContext, undoOf: string | null): Pro
             controls[d.field] = d.control;
             values[d.field] = toRaw(key, d, v);
             labels[d.field] = key;
+            if (m.kind === "url" && d.field === "display") {
+                // La presentación «embed» sólo vale si el sitio la ofrece en el formulario: si no, se rechaza antes de planear (sin POST).
+                const offered = offeredOptions(await ctx.web.readPage("modedit_form", { update: String(m.cmid) }), "display");
+                if (!offered.includes(values[d.field]!)) throw new CampusError("WRITE_NOT_ALLOWED", `«${key}» no lo ofrece el sitio para esta actividad. Opciones ofrecidas: ${offered.join(", ") || "ninguna"}.`);
+            }
         }
         if (input.restrictions !== undefined) {
             if (!fields.some(([n]) => n === RESTRICTIONS_FIELD)) throw new CampusError("WRITE_NOT_ALLOWED", "Esta actividad no admite restricciones de acceso.");
@@ -245,7 +250,7 @@ const value = z.union([z.string().max(64), z.number(), z.boolean()]);
 const shape = {
     course_id: z.number().int().positive(),
     course_module_id: z.number().int().positive().describe("cmid de la actividad."),
-    settings: z.record(z.string().max(64), value).optional().describe("Ajustes por clave del catálogo (ADR-082). Comunes: group_mode (none|separate|visible), grouping_id, show_description. Por tipo: choice (allow_update, allow_multiple, show_results…), forum (forum_type, subscription, max_attachments…), glossary, data, choicegroup, assign (online_text, file_submissions, max_files…), quiz (grade_method, navigation, shuffle_answers, behaviour, review_<qué>_<cuándo>…), lesson, h5pactivity, book, wiki, folder, resource. Un error lista las claves admitidas."),
+    settings: z.record(z.string().max(64), value).optional().describe("Ajustes por clave del catálogo (ADR-082). Comunes: group_mode (none|separate|visible), grouping_id, show_description. Por tipo: choice (allow_update, allow_multiple, show_results…), forum (forum_type, subscription, max_attachments…), glossary, data, choicegroup, assign (online_text, file_submissions, max_files…), quiz (grade_method, navigation, shuffle_answers, behaviour, review_<qué>_<cuándo>…), lesson, h5pactivity, book, wiki, folder, url (display: automatic, embed u open), resource. Un error lista las claves admitidas."),
     restrictions: z
         .object({
             from: z.string().max(40).nullable().optional().describe("Disponible desde (AAAA-MM-DDTHH:MM, zona del perfil)."),
@@ -263,7 +268,7 @@ export const activitySettingsIntent: WriteIntent<typeof shape> = {
     name: "activity_settings",
     title: "Plan: cambiar ajustes de una actividad (grupos, restricciones y ajustes por tipo)",
     description:
-        "Arma el plan para cambiar ajustes de una actividad existente: modo de grupos, agrupamiento, mostrar la descripción, restricciones de acceso (fechas, grupos, agrupamiento) y un catálogo de ajustes propios de cada tipo (consulta, foro, glosario, base de datos, elección de grupo, tarea, cuestionario, lección, H5P, libro, wiki, carpeta, archivo). Muestra antes y después. No escribe.",
+        "Arma el plan para cambiar ajustes de una actividad existente: modo de grupos, agrupamiento, mostrar la descripción, restricciones de acceso (fechas, grupos, agrupamiento) y un catálogo de ajustes propios de cada tipo (consulta, foro, glosario, base de datos, elección de grupo, tarea, cuestionario, lección, H5P, libro, wiki, carpeta, archivo, enlace). Muestra antes y después. No escribe.",
     inputShape: shape,
     capability: "edit_activity",
     synthetic_only: false,

@@ -14,6 +14,8 @@ export interface SettingDef {
     control: Control;
     /** Valores públicos → valor del formulario (select). Para booleanos: true → "1", false → "0". */
     values?: Record<string, string>;
+    /** Valores del formulario que sólo se aceptan al deshacer (restaurar lo que había), nunca como pedido. */
+    restore?: string[];
     /** Rango para enteros (select numérico o texto). */
     min?: number;
     max?: number;
@@ -168,6 +170,11 @@ export const KIND_SETTINGS: Record<string, Record<string, SettingDef>> = {
         show_expanded: adv("showexpanded", "Subcarpetas expandidas."),
         download_button: adv("showdownloadfolder", "Botón de descargar la carpeta."),
         force_download: adv("forcedownload", "Forzar la descarga de los archivos."),
+    },
+    // Presentación del enlace (RESOURCELIB_DISPLAY_AUTO 0, _EMBED 1, _OPEN 5). Frame, new y popup quedan afuera.
+    url: {
+        // Deshacer puede restaurar las otras presentaciones de Moodle (2 marco, 3 ventana nueva, 4 descarga, 6 emergente).
+        display: { ...pick("display", { automatic: "0", embed: "1", open: "5" }, "Presentación del enlace: automatic (Moodle decide), embed (dentro del Campus) u open (en otra página)."), restore: ["2", "3", "4", "6"] },
     },
     resource: {
         show_size: box("showsize", "Mostrar el tamaño."),

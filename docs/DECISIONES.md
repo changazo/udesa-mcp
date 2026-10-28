@@ -2198,3 +2198,18 @@ Falta la prueba con una cuenta de estudiante, que necesita su inicio de sesión.
 
 **Validado en real:** con la sesión vencida, el remoto inicia sesión solo, sin código. `tool_mfa` admite varios dispositivos de confianza por usuario: el del remoto y el de la PC conviven.
 **Tests:** `remote-web-autologin.test.ts` (12) y `remote.test.ts` (3 de punta a punta: login sin código como «remoto», sin segunda llave, y código pedido con la instrucción remota).
+
+## ADR-128 · Recursos incrustados tipados (propuesta, no adoptada)
+
+**Decisión propuesta:**
+- **Presentación de URL** (`display`: `automatic`, `embed`, `open`), comprobada contra el formulario del sitio antes del POST. Es la vía para mostrar Python Tutor dentro de Moodle.
+- **`iframe_embed`** (H5P) para insertar cualquier página https. Sólo la dirección, validada; nada de HTML. El plan advierte que el contenido lo controla otro sitio.
+- Ninguna de las dos da seguimiento: no llegan intentos ni progreso al Campus.
+
+**Descartado:** un tipo H5P propio para Python Tutor. Dentro del Iframe Embedder, Python Tutor no muestra el visualizador, y la causa no está identificada.
+
+**Riesgos:** la página incrustada la controla otro sitio y puede cambiar o bloquear la incrustación (en ese caso conviene `display: open`). Python Tutor ejecuta el código en sus servidores: sólo ejemplos públicos.
+
+**Validado en real** en un curso de pruebas: un enlace a Python Tutor con `display: embed` se ve dentro de Moodle; `iframe_embed` muestra una página que permite incrustarse y muestra el bloqueo de una que no lo permite.
+
+**Falta para adoptarla:** probar el deshacer de la presentación en el curso de pruebas.

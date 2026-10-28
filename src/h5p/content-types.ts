@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { CampusError } from "../errors.js";
-import { toHtml } from "../write/text.js";
+import { toHtml, type CodeBlocks } from "../write/text.js";
 import { type ContentFactory, type SubContent, machineOf } from "./semantics.js";
 
 /**
@@ -156,7 +156,23 @@ export const PythonExerciseSpec = z.strictObject({
     height_px: z.number().int().min(300).max(2000).optional().describe("Alto del marco (por defecto 650)."),
 });
 
-export const H5pContentSpec = z.discriminatedUnion("type", [QuestionSetSpec, CoursePresentationSpec, InteractiveBookSpec, InteractiveVideoSpec, BranchingScenarioSpec, DialogCardsSpec, ChartSpec, TimelineSpec, AccordionSpec, PythonExerciseSpec]);
+/** Largo máximo de la dirección de un recurso incrustado. */
+const EMBED_MAX_URL = 5600;
+const embedHeight = z.number().int().min(350).max(1600);
+
+/**
+ * Recurso incrustado genérico (H5P.IFrameEmbed): cualquier página https, para insertar en el curso contenido de
+ * otro sitio (simuladores, visualizaciones, documentos). El sitio controla lo que se ve; el plan lo advierte.
+ */
+const IframeEmbedSpec = z.strictObject({
+    type: z.literal("iframe_embed"),
+    source_url: z.string().trim().min(1).max(EMBED_MAX_URL).describe("Dirección https de la página a incrustar (cualquier sitio, sin usuario ni contraseña)."),
+    height_px: embedHeight.optional().describe("Alto del marco (por defecto 760)."),
+    min_width_px: z.number().int().min(250).max(800).optional().describe("Ancho mínimo (por defecto 300)."),
+    resize_supported: z.boolean().optional().describe("Sólo si la página informa su altura a H5P (por defecto no)."),
+});
+
+export const H5pContentSpec = z.discriminatedUnion("type", [QuestionSetSpec, CoursePresentationSpec, InteractiveBookSpec, InteractiveVideoSpec, BranchingScenarioSpec, DialogCardsSpec, ChartSpec, TimelineSpec, AccordionSpec, PythonExerciseSpec, IframeEmbedSpec]);
 export type H5pContent = z.infer<typeof H5pContentSpec>;
 
 /** Biblioteca principal y versión mayor admitida por tipo (los parámetros dependen de la versión mayor). */
@@ -171,7 +187,45 @@ export const MAIN_LIBRARY: Record<H5pContent["type"], { machine: string; major: 
     timeline: { machine: "H5P.Timeline", major: 1, label: "Timeline" },
     accordion: { machine: "H5P.Accordion", major: 1, label: "Accordion" },
     python_exercise: { machine: "H5P.IFrameEmbed", major: 1, label: "Ejercicio de Python (Iframe Embedder)" },
+    iframe_embed: { machine: "H5P.IFrameEmbed", major: 1, label: "Recurso incrustado (Iframe Embedder)" },
 };
+
+/**
+ * Dirección de un recurso incrustado: cualquier página https, sin usuario ni contraseña. Devuelve el texto que se
+ * guarda en `source`. El Iframe Embedder de H5P lo lee como HTML (DOMParser) y le aplica `encodeURI` al cargarlo:
+ * por eso se guarda sin codificar (`decodeURI`) y se exige que `encodeURI` lo devuelva idéntico. Una dirección con
+ * escapes que ese paso alteraría (como `%26` o `%23`), o con `<`, `>` o comillas, se rechaza en vez de romperse.
+ */
+export function embedSource(raw: string): string {
+    if (raw.length > EMBED_MAX_URL) throw new CampusError("WRITE_NOT_ALLOWED", `La dirección del recurso supera ${EMBED_MAX_URL} caracteres.`);
+    let u: URL;
+    try {
+        u = new URL(raw);
+    } catch {
+        throw new CampusError("WRITE_NOT_ALLOWED", "La dirección del recurso no es válida.");
+    }
+    if (u.protocol !== "https:") throw new CampusError("WRITE_NOT_ALLOWED", "El recurso incrustado tiene que ser https.");
+    if (u.username || u.password) throw new CampusError("WRITE_NOT_ALLOWED", "La dirección del recurso no puede llevar usuario ni contraseña.");
+    let source: string;
+    try {
+        source = decodeURI(u.href);
+    } catch {
+        throw new CampusError("WRITE_NOT_ALLOWED", "La dirección del recurso tiene escapes inválidos.");
+    }
+    // Los caracteres de control (como %0D o %00) los alteraría el DOMParser: se rechazan.
+    if (/[<>"\u0000-\u001f\u007f]/.test(source) || encodeURI(source) !== u.href) throw new CampusError("WRITE_NOT_ALLOWED", "El Iframe Embedder de H5P alteraría esta dirección al cargarla (escapes de caracteres reservados como %26, %23, %3A o %2F, caracteres de control, o < > \"). Usá otra forma de la dirección, o un enlace de Moodle con display: embed.");
+    return source;
+}
+
+/** Advertencias propias del contenido, para el plan. */
+export function contentWarnings(spec: H5pContent): string[] {
+    if (spec.type !== "iframe_embed") return [];
+    return [
+        `Incrusta una página de ${new URL(spec.source_url).origin}: ese sitio controla lo que se ve, puede ejecutar scripts dentro del marco y cambiar o dejar de estar disponible. Puede bloquear la incrustación (X-Frame-Options o frame-ancestors).`,
+        "La página incrustada no recibe la identidad del estudiante ni devuelve intentos o progreso al Campus.",
+    ];
+}
+
 
 /**
  * Laboratorio de mini-aplicaciones (ADR-116): proyecto de Vercel aparte, sólo incrustable desde el Campus.
@@ -197,7 +251,14 @@ const tlDate = (d: string) => d.replace(/-(?=\d)/g, (m, i: number) => (i === 0 ?
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 // El Markdown del MCP baja los títulos dos niveles (para foros); H5P sólo admite h2 y h3: # → h2, ## y más → h3.
-const html = (markdown: string) => toHtml(markdown, "markdown").replace(/<(\/?)h([3-6])>/g, (_m, close: string, level: string) => `<${close}h${Math.min(3, Number(level) - 1)}>`);
+/**
+ * Markdown → HTML para un campo de H5P. Por defecto los bloques cercados se degradan a `<code>` (campo sin
+ * `<pre>` verificado en la semántica). Pasan `pre` estos campos, que lo admiten en la instalación examinada:
+ * MultiChoice.question, TrueFalse.question, AdvancedText.text, DragText.taskDescription y Blanks.text. Otros
+ * también lo admiten (pregunta del escenario ramificado, portada del libro, texto de la línea de tiempo) y
+ * por ahora usan el modo en línea.
+ */
+const html = (markdown: string, codeBlocks: CodeBlocks = "inline") => toHtml(markdown, "markdown", codeBlocks).replace(/<(\/?)h([3-6])>/g, (_m, close: string, level: string) => `<${close}h${Math.min(3, Number(level) - 1)}>`);
 const MACHINE: Record<Block["kind"], string> = { text: "H5P.AdvancedText", multiple_choice: "H5P.MultiChoice", true_false: "H5P.TrueFalse", drag_words: "H5P.DragText", fill_blanks: "H5P.Blanks" };
 const TITLES: Record<Block["kind"], string> = { text: "Texto", multiple_choice: "Opción múltiple", true_false: "Verdadero o falso", drag_words: "Arrastrar palabras", fill_blanks: "Completar" };
 
@@ -213,23 +274,23 @@ function block(f: ContentFactory, b: Block, parent: string, path: string[]): Sub
     const title = shortTitle(b);
     switch (b.kind) {
         case "text":
-            return f.lib(lib, { text: html(b.markdown) }, title);
+            return f.lib(lib, { text: html(b.markdown, "pre") }, title);
         case "multiple_choice":
             return f.lib(
                 lib,
                 {
-                    question: html(b.question),
+                    question: html(b.question, "pre"),
                     answers: b.answers.map((a) => ({ text: `<div>${esc(a.text)}</div>`, correct: a.correct, tipsAndFeedback: { tip: "", chosenFeedback: a.feedback ? `<div>${esc(a.feedback)}</div>` : "", notChosenFeedback: "" } })),
                     behaviour: { randomAnswers: b.randomize ?? true },
                 },
                 title,
             );
         case "true_false":
-            return f.lib(lib, { question: html(b.question), correct: b.correct ? "true" : "false", behaviour: { ...(b.feedback_correct ? { feedbackOnCorrect: b.feedback_correct } : {}), ...(b.feedback_wrong ? { feedbackOnWrong: b.feedback_wrong } : {}) } }, title);
+            return f.lib(lib, { question: html(b.question, "pre"), correct: b.correct ? "true" : "false", behaviour: { ...(b.feedback_correct ? { feedbackOnCorrect: b.feedback_correct } : {}), ...(b.feedback_wrong ? { feedbackOnWrong: b.feedback_wrong } : {}) } }, title);
         case "drag_words":
-            return f.lib(lib, { taskDescription: html(b.task), textField: b.text, ...(b.distractors?.length ? { distractors: b.distractors.map((d) => `*${d}*`).join(" ") } : {}) }, title);
+            return f.lib(lib, { taskDescription: html(b.task, "pre"), textField: b.text, ...(b.distractors?.length ? { distractors: b.distractors.map((d) => `*${d}*`).join(" ") } : {}) }, title);
         case "fill_blanks":
-            return f.lib(lib, { text: html(b.task ?? "Completá los espacios."), questions: b.lines.map((l) => `<p>${esc(l)}</p>`), behaviour: { caseSensitive: b.case_sensitive ?? false } }, title);
+            return f.lib(lib, { text: html(b.task ?? "Completá los espacios.", "pre"), questions: b.lines.map((l) => `<p>${esc(l)}</p>`), behaviour: { caseSensitive: b.case_sensitive ?? false } }, title);
     }
 }
 
@@ -371,8 +432,10 @@ export function buildContentParams(spec: H5pContent, main: string, f: ContentFac
             return f.params(main, { width: "100%", minWidth: "300px", height: `${spec.height_px ?? 650}px`, source: pythonExerciseUrl(spec), resizeSupported: false }); // alto fijo: la mini-app no trae el script de redimensionado de H5P
         case "accordion": {
             const lib = f.option(main, ["panels", "content"], "H5P.AdvancedText");
-            return f.params(main, { panels: spec.panels.map((p) => ({ title: p.title, content: f.lib(lib, { text: html(p.markdown) }, p.title) })), hTag: spec.heading ?? "h2" });
+            return f.params(main, { panels: spec.panels.map((p) => ({ title: p.title, content: f.lib(lib, { text: html(p.markdown, "pre") }, p.title) })), hTag: spec.heading ?? "h2" });
         }
+        case "iframe_embed":
+            return f.params(main, { width: "100%", minWidth: `${spec.min_width_px ?? 300}px`, height: `${spec.height_px ?? 760}px`, source: embedSource(spec.source_url), resizeSupported: spec.resize_supported ?? false });
     }
 }
 
@@ -400,6 +463,10 @@ export function describeContent(spec: H5pContent): Record<string, unknown> {
             return { panels: spec.panels.map((p) => p.title) };
         case "python_exercise":
             return { app: `${LAB_BASE_URL}/apps/python/`, function_name: spec.function_name, tests: spec.tests.length, hidden_tests: spec.tests.filter((t) => t.hidden).length };
+        case "iframe_embed": {
+            const u = new URL(spec.source_url);
+            return { source: spec.source_url, origin: u.origin, height_px: spec.height_px ?? 760 };
+        }
     }
 }
 

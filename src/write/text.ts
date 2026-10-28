@@ -21,11 +21,29 @@ function inline(s: string): string {
     return out;
 }
 
-export function markdownToHtml(md: string): string {
+/**
+ * Cómo se muestran los bloques cercados (```). `pre` los envuelve en `<pre><code>` (Moodle lo admite).
+ * `inline` es para campos que no admiten `<pre>` (H5P según la semántica instalada): baja a `<code>` con
+ * saltos `<br>` y la sangría como espacios no separables, para que el código siga legible.
+ */
+export type CodeBlocks = "pre" | "inline";
+
+// Después de ``` puede venir cualquier rótulo sin comillas invertidas («python», «c#», «js title="x"»).
+const FENCE_OPEN = /^\s*```[^`]*$/;
+const FENCE_CLOSE = /^\s*```\s*$/;
+
+function codeBlock(lines: string[], mode: CodeBlocks): string {
+    const escaped = lines.map((l) => esc(l.replace(/\t/g, "    ")));
+    if (mode === "pre") return `<pre><code>${escaped.join("\n")}</code></pre>`;
+    return `<p><code>${escaped.map((l) => l.replace(/^ +/, (sp) => "&nbsp;".repeat(sp.length))).join("<br>")}</code></p>`;
+}
+
+export function markdownToHtml(md: string, codeBlocks: CodeBlocks = "pre"): string {
     const lines = md.replace(/\r\n?/g, "\n").split("\n");
     const out: string[] = [];
     let para: string[] = [];
     let list: { tag: "ul" | "ol"; items: string[] } | null = null;
+    let fence: string[] | null = null;
     const flushPara = () => {
         if (para.length) out.push(`<p>${para.map(inline).join("<br>")}</p>`);
         para = [];
@@ -35,6 +53,20 @@ export function markdownToHtml(md: string): string {
         list = null;
     };
     for (const raw of lines) {
+        // Dentro de un bloque cercado no se interpreta nada: cada línea es código tal cual.
+        if (fence) {
+            if (FENCE_CLOSE.test(raw)) {
+                out.push(codeBlock(fence, codeBlocks));
+                fence = null;
+            } else fence.push(raw);
+            continue;
+        }
+        if (FENCE_OPEN.test(raw)) {
+            flushPara();
+            flushList();
+            fence = [];
+            continue;
+        }
         const line = raw.trimEnd();
         const h = /^(#{1,4})\s+(.+)$/.exec(line);
         const ul = /^\s*[-*]\s+(.+)$/.exec(line);
@@ -60,13 +92,15 @@ export function markdownToHtml(md: string): string {
     }
     flushPara();
     flushList();
+    // Un bloque sin cierre se toma como código hasta el final, en vez de perderse.
+    if (fence) out.push(codeBlock(fence, codeBlocks));
     return out.join("\n");
 }
 
-export function toHtml(text: string, format: TextFormat): string {
+export function toHtml(text: string, format: TextFormat, codeBlocks: CodeBlocks = "pre"): string {
     if (format === "html") return text;
     if (format === "texto") return text.replace(/\r\n?/g, "\n").split(/\n{2,}/).map((p) => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`).join("\n");
-    return markdownToHtml(text);
+    return markdownToHtml(text, codeBlocks);
 }
 
 /** Texto comparable: sin etiquetas, entidades resueltas y espacios colapsados (Moodle reformatea el HTML al devolverlo). */
