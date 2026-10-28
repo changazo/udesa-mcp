@@ -5,6 +5,7 @@ import type { IntentContext, Interpretation, ItemVerification, Presence, WriteIn
 import type { Difference, Plan, PlanDraft, PlanItem } from "../plan.js";
 import { comparable, toHtml } from "../text.js";
 import type { FormSubmission } from "../web.js";
+import { ChatFile } from "../chat-files.js";
 import { describeLocalFiles, type PlanFile } from "../files.js";
 import { h5pPackageOf } from "./h5p-package.js";
 import { fieldOf, offeredOptions, readModForm } from "./modform.js";
@@ -202,6 +203,12 @@ const shape = {
     text: z.string().min(1).max(50_000).optional().describe("label: texto de la etiqueta (Markdown)."),
     file_path: z.string().min(1).max(1000).optional().describe("resource: archivo; h5pactivity: paquete .h5p. Ruta ABSOLUTA del archivo local que indicó el humano (sólo servidor local)."),
     file_paths: z.array(z.string().min(1).max(1000)).min(1).max(MAX_FOLDER_FILES).optional().describe("folder: rutas ABSOLUTAS de los archivos locales (hasta 10; sólo servidor local)."),
+    files: z
+        .array(ChatFile)
+        .min(1)
+        .max(MAX_FOLDER_FILES)
+        .optional()
+        .describe("resource, folder o h5pactivity: archivos que entrega el cliente (ChatGPT: adjuntos o generados en la conversación). En lugar de file_path / file_paths; funciona también en el remoto. resource y h5pactivity: exactamente uno."),
     options: z.array(z.string().min(1).max(255)).min(1).max(30).optional().describe("choice: opciones de la consulta, en orden (sin repetir)."),
     first_page_title: z.string().min(1).max(255).optional().describe("wiki: título de la primera página."),
     wiki_mode: z.enum(["collaborative", "individual"]).optional().describe("wiki: colaborativa (por defecto) o individual."),
@@ -216,9 +223,9 @@ const OWN: Record<Kind, readonly (keyof typeof shape)[]> = {
     page: ["content"],
     url: ["external_url", "display"],
     label: ["text"],
-    resource: ["file_path"],
+    resource: ["file_path", "files"],
     forum: ["subscription", "whole_forum_grade"],
-    folder: ["file_paths"],
+    folder: ["file_paths", "files"],
     book: [],
     wiki: ["first_page_title", "wiki_mode"],
     glossary: [],
@@ -227,11 +234,11 @@ const OWN: Record<Kind, readonly (keyof typeof shape)[]> = {
     lesson: [],
     questionnaire: [],
     choicegroup: ["group_ids"],
-    h5pactivity: ["file_path"],
+    h5pactivity: ["file_path", "files"],
     subsection: [],
 };
 const REQUIRED: Partial<Record<Kind, keyof typeof shape>> = { page: "content", url: "external_url", label: "text", resource: "file_path", folder: "file_paths", wiki: "first_page_title", choice: "options", choicegroup: "group_ids", h5pactivity: "file_path" };
-const SPECIFIC = ["content", "external_url", "display", "text", "file_path", "file_paths", "options", "first_page_title", "wiki_mode", "group_ids", "subscription", "whole_forum_grade"] as const;
+const SPECIFIC = ["content", "external_url", "display", "text", "file_path", "file_paths", "files", "options", "first_page_title", "wiki_mode", "group_ids", "subscription", "whole_forum_grade"] as const;
 /** Presentación de un enlace: valor público → valor de `RESOURCELIB_DISPLAY_*` que envía el formulario de Moodle. */
 const URL_DISPLAY = { automatic: "0", embed: "1", open: "5" } as const;
 
@@ -239,8 +246,9 @@ export const createContentIntent: WriteIntent<typeof shape> = {
     name: "create_content",
     title: "Plan: crear contenido o una actividad (página, enlace, etiqueta, archivo, carpeta, libro, wiki, glosario, consulta…)",
     description:
-        "Arma el plan para crear en una sección existente: página (content), enlace (external_url), etiqueta (text), archivo (file_path local), foro, carpeta (file_paths locales), libro, wiki (first_page_title), glosario, consulta (options), base de datos, lección, encuesta, elección de grupo (group_ids), actividad H5P (file_path .h5p local) o subsección. Libros, glosarios, wikis, bases de datos, lecciones y encuestas se crean vacíos. Por defecto oculto y sin notificar. No escribe.",
+        "Arma el plan para crear en una sección existente: página (content), enlace (external_url), etiqueta (text), archivo (file_path local o files), foro, carpeta (file_paths locales o files), libro, wiki (first_page_title), glosario, consulta (options), base de datos, lección, encuesta, elección de grupo (group_ids), actividad H5P (file_path .h5p local o files) o subsección. Libros, glosarios, wikis, bases de datos, lecciones y encuestas se crean vacíos. Por defecto oculto y sin notificar. No escribe.",
     inputShape: shape,
+    fileParams: ["files"],
     capability: "create_content",
     synthetic_only: false,
     readVersions,
@@ -251,8 +259,13 @@ export const createContentIntent: WriteIntent<typeof shape> = {
         const kind = input.type as Kind;
         // ADR-110: campus_plan_h5p_content pasa el paquete ya generado (no es un parámetro de esta herramienta).
         const generated = (input as { generated_file?: PlanFile }).generated_file;
+        // Archivos del cliente (ChatGPT): el motor ya los bajó y validó (`files` → `chat_files.files`).
+        const chat = (input as { chat_files?: Record<string, PlanFile[]> }).chat_files?.files;
         const needed = REQUIRED[kind];
-        if (needed && input[needed] === undefined && !(kind === "h5pactivity" && generated)) throw new CampusError("WRITE_NOT_ALLOWED", `Para type=${kind} hace falta ${needed}.`);
+        const byFiles = (kind === "resource" || kind === "folder" || kind === "h5pactivity") && input.files !== undefined;
+        if (byFiles && input[needed!] !== undefined) throw new CampusError("WRITE_NOT_ALLOWED", `Indicá ${needed} o files, no los dos.`);
+        if (needed && input[needed] === undefined && !byFiles && !(kind === "h5pactivity" && generated)) throw new CampusError("WRITE_NOT_ALLOWED", `Para type=${kind} hace falta ${needed}${kind === "resource" || kind === "folder" || kind === "h5pactivity" ? " o files" : ""}.`);
+        if (byFiles && !chat?.length) throw new CampusError("WRITE_NOT_ALLOWED", "No llegaron los archivos de files.");
         const extra: string[] = SPECIFIC.filter((k) => !OWN[kind].includes(k) && input[k] !== undefined);
         if (extra.length) throw new CampusError("WRITE_NOT_ALLOWED", `Para type=${kind} no corresponde: ${extra.join(", ")}.`);
         const c = await contents(ctx, input.course_id);
@@ -315,13 +328,14 @@ export const createContentIntent: WriteIntent<typeof shape> = {
             expected.grade_forum = grade ?? 0;
             Object.assign(preview, { forum_type: "general", subscription: subscribe === 3 ? "deshabilitada (nadie recibe correo)" : "opcional", whole_forum_grade: grade ?? "sin calificación", grade_notifications: "no" });
         } else if (kind === "resource" || kind === "h5pactivity") {
-            const [file] = generated && kind === "h5pactivity" ? [generated] : describeLocalFiles([input.file_path!], maxBytes, 1);
+            if (chat && chat.length !== 1) throw new CampusError("WRITE_NOT_ALLOWED", `Para type=${kind} va exactamente un archivo en files.`);
+            const [file] = generated && kind === "h5pactivity" ? [generated] : chat ?? describeLocalFiles([input.file_path!], maxBytes, 1);
             if (kind === "h5pactivity" && !/\.h5p$/i.test(file!.filename)) throw new CampusError("WRITE_NOT_ALLOWED", "Una actividad H5P necesita un paquete .h5p.");
             uploads = { field: kind === "resource" ? "files" : "packagefile", files: [file!] };
             if (kind === "resource") expected.file = `${file!.filename}:${file!.size}`;
             preview.file = { filename: file!.filename, bytes: file!.size, sha256: file!.sha256, path: file!.path };
         } else if (kind === "folder") {
-            const files = describeLocalFiles(input.file_paths!, maxBytes, MAX_FOLDER_FILES);
+            const files = chat ?? describeLocalFiles(input.file_paths!, maxBytes, MAX_FOLDER_FILES);
             const names = files.map((f) => f.filename);
             if (new Set(names).size !== names.length) throw new CampusError("WRITE_NOT_ALLOWED", "Hay dos archivos con el mismo nombre.");
             uploads = { field: "files", files };

@@ -135,6 +135,13 @@ describe("W1 · aviso (§8.1)", () => {
         const h = await harness({ sandbox_course_ids: [], courses: { [String(COURSE)]: [{ capability: "post_announcement", enabled_on: "2020-01-01" }] } });
         expect((await plan(h, "announcement", { subject: "a", message: "b" })).risk).toBe("R3");
     });
+
+    it("curso real con suscripción forzada: una respuesta también es R3, porque le llega a todos (ADR-130)", async () => {
+        const h = await harness({ sandbox_course_ids: [], courses: { [String(COURSE)]: ["reply_forum"] } });
+        const p = await plan(h, "forum_reply", { discussion_id: D_WELCOME, message: "Gracias" });
+        expect(p.risk).toBe("R3");
+        expect(p.warnings[0]).toContain("suscripción forzada");
+    });
 });
 
 describe("W1 · respuesta (§8.1)", () => {

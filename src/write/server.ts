@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { toPublicError } from "../errors.js";
 import type { Logger } from "../util/logger.js";
+import { fileParamsMeta, publishOpenAiFileSchemas } from "./chat-files.js";
 import { ElicitationConfirmer, type Confirmer } from "./confirm.js";
 import { resultError, type WriteEngine } from "./engine.js";
 import type { WriteIntent } from "./intent.js";
@@ -62,7 +63,7 @@ export function registerWriteTools(server: McpServer, deps: WriteServerDeps): Mc
         const tool = `campus_plan_${intent.name}`;
         server.registerTool(
             tool,
-            { title: intent.title, description: intent.description, inputSchema: intent.inputShape, annotations: ReadOnly },
+            { title: intent.title, description: intent.description, inputSchema: intent.inputShape, annotations: ReadOnly, ...(intent.fileParams?.length ? { _meta: fileParamsMeta(intent.fileParams) } : {}) },
             (args: Record<string, unknown>) => run(tool, () => deps.engine.plan(intent.name, args as Record<string, unknown> & { course_id: number }, client())),
         );
     }
@@ -147,5 +148,7 @@ export function registerWriteTools(server: McpServer, deps: WriteServerDeps): Mc
         () => run("campus_get_write_status", async () => deps.engine.status()),
     );
 
+    // Los campos de archivo se publican con el esquema que documenta OpenAI ($defs), no el draft-07 del SDK.
+    publishOpenAiFileSchemas(server.server);
     return server;
 }

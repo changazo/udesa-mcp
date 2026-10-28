@@ -69,10 +69,20 @@ export interface WriteStore {
     readAudit(): Promise<Record<string, unknown>[]>;
     saveApproval(planId: string, a: WebApproval): Promise<boolean>;
     loadApproval(planId: string): Promise<WebApproval | null>;
+    /** Bytes de un archivo entregado por el cliente (ChatGPT), por su sha256, con vencimiento. */
+    putBlob(sha256: string, data: Buffer, ttlSeconds: number): Promise<void>;
+    /** null si no existe o ya venció. */
+    getBlob(sha256: string): Promise<Buffer | null>;
 }
 
 function checkId(planId: string) {
     if (!PLAN_ID.test(planId)) throw new CampusError("RESOURCE_OUT_OF_SCOPE", "Identificador de plan inválido.");
+}
+
+const SHA256 = /^[0-9a-f]{64}$/;
+
+function checkSha(sha256: string) {
+    if (!SHA256.test(sha256)) throw new CampusError("RESOURCE_OUT_OF_SCOPE", "Identificador de archivo inválido.");
 }
 
 function parseAuditLines(lines: string[]): Record<string, unknown>[] {
@@ -218,6 +228,29 @@ export class FileWriteStore implements WriteStore {
             return null;
         }
     }
+
+    /** `blobs/<sha256>.bin`, con el vencimiento en `blobs/<sha256>.exp`. Los vencidos se borran al leerlos. */
+    async putBlob(sha256: string, data: Buffer, ttlSeconds: number): Promise<void> {
+        checkSha(sha256);
+        const dir = join(this.location, "blobs");
+        this.writeAtomic(join(dir, `${sha256}.bin`), data.toString("base64"));
+        this.writeAtomic(join(dir, `${sha256}.exp`), String(Date.now() + ttlSeconds * 1000));
+    }
+
+    async getBlob(sha256: string): Promise<Buffer | null> {
+        checkSha(sha256);
+        const dir = join(this.location, "blobs");
+        try {
+            if (Number(readFileSync(join(dir, `${sha256}.exp`), "utf8")) < Date.now()) {
+                rmSync(join(dir, `${sha256}.bin`), { force: true });
+                rmSync(join(dir, `${sha256}.exp`), { force: true });
+                return null;
+            }
+            return Buffer.from(readFileSync(join(dir, `${sha256}.bin`), "utf8"), "base64");
+        } catch {
+            return null;
+        }
+    }
 }
 
 // ---------- KV (remoto) ----------
@@ -313,6 +346,8 @@ export class MemoryKv implements KvClient {
 }
 
 const PLAN_TTL_S = 30 * 86_400;
+/** 4 MB por trozo: en base64, unos 5,4 MB por pedido al KV. */
+export const BLOB_CHUNK_BYTES = 4 * 1024 * 1024;
 const APPROVAL_TTL_S = 3_600;
 const AUDIT_MAX = 20_000;
 const LIST_MAX = 500;
@@ -399,5 +434,31 @@ export class KvWriteStore implements WriteStore {
         checkId(planId);
         const raw = await this.kv.cmd(["GET", this.k("approval", planId)]);
         return typeof raw === "string" ? (JSON.parse(raw) as WebApproval) : null;
+    }
+
+    /**
+     * En trozos de BLOB_CHUNK_BYTES (Upstash admite 10 MB por pedido y el archivo viaja en base64). La
+     * cantidad de trozos se escribe al final: sin ella, el archivo no existe.
+     */
+    async putBlob(sha256: string, data: Buffer, ttlSeconds: number): Promise<void> {
+        checkSha(sha256);
+        const n = Math.max(1, Math.ceil(data.length / BLOB_CHUNK_BYTES));
+        for (let i = 0; i < n; i++) {
+            await this.kv.cmd(["SET", this.k("blob", sha256, String(i)), data.subarray(i * BLOB_CHUNK_BYTES, (i + 1) * BLOB_CHUNK_BYTES).toString("base64"), "EX", ttlSeconds]);
+        }
+        await this.kv.cmd(["SET", this.k("blob", sha256), String(n), "EX", ttlSeconds]);
+    }
+
+    async getBlob(sha256: string): Promise<Buffer | null> {
+        checkSha(sha256);
+        const n = Number(await this.kv.cmd(["GET", this.k("blob", sha256)]));
+        if (!Number.isInteger(n) || n < 1) return null;
+        const parts: Buffer[] = [];
+        for (let i = 0; i < n; i++) {
+            const raw = await this.kv.cmd(["GET", this.k("blob", sha256, String(i))]);
+            if (typeof raw !== "string") return null;
+            parts.push(Buffer.from(raw, "base64"));
+        }
+        return Buffer.concat(parts);
     }
 }

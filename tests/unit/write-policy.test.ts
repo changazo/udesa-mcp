@@ -22,7 +22,7 @@ const code = (fn: () => unknown) => {
 const CAPS = ["assign_override", "calendar_event", "course_visibility", "create_assignment", "create_attendance", "create_content", "create_quiz", "create_section", "delete_content", "delete_student_work", "edit_activity", "edit_own_post", "edit_quiz", "grade_forum", "grade_quiz", "grade_submission", "grant_extension", "import_questions", "lock_submissions", "manage_activity_entries", "manage_gradebook", "manage_groups", "moderate_forum", "move_content", "pin_lock_discussion", "post_announcement", "quiz_override", "rename_content", "reply_forum", "send_message", "submission_comment", "take_attendance"];
 
 describe("perfil de escritura (§5.1)", () => {
-    it("el perfil de ejemplo carga con su perfil de lectura; todos los cursos con rol de escritura (ADR-125); sin sandbox ni cuentas de prueba; notificar=no", () => {
+    it("el perfil de ejemplo carga con su perfil de lectura; todos los cursos con rol de escritura (ADR-125); sin sandbox ni cuentas de prueba; notifica a participantes (ADR-130) pero no por defecto", () => {
         const wp = loadWriteProfile({ profileId: "udesa-docente-escritura", env: {} });
         // Nombres nuevos (ADR-062): docente-completo y docente-lectura apuntan a los mismos perfiles.
         expect(loadWriteProfile({ profileId: "docente-completo", env: {} }).profile_id).toBe("udesa-docente-escritura");
@@ -36,7 +36,7 @@ describe("perfil de escritura (§5.1)", () => {
         expect([...wp.policy.courses.keys()]).toEqual([]);
         expect(wp.policy.notifiable_user_ids).toEqual([]);
         expect(wp.policy.all_courses.map((g) => g.capability).sort()).toEqual(CAPS);
-        expect(wp.policy.allow_participant_notifications).toBe(false);
+        expect(wp.policy.allow_participant_notifications).toBe(true);
         expect(wp.policy.notify_students_default).toBe(false);
         expect(wp.policy.require_out_of_band_from_risk).toBe("nunca");
         // Contra el Campus real: las intenciones de foros (W1), nunca la de prueba.

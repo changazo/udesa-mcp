@@ -47,6 +47,11 @@ export interface WriteIntent<S extends z.ZodRawShape = z.ZodRawShape> {
     description: string;
     inputShape: S;
     capability: WriteCapability;
+    /**
+     * Campos de archivo que entrega el cliente (ChatGPT, `openai/fileParams`). El motor los baja antes de
+     * `plan` y los pasa ya descritos en `input.chat_files[campo]`.
+     */
+    fileParams?: readonly string[];
     /** Sólo se registra contra el Moodle sintético (sitio .test). */
     synthetic_only: boolean;
     /** Lee y valida; NUNCA escribe. Lanza errores tipados (AMBIGUOUS_RESOURCE, RESOURCE_OUT_OF_SCOPE…). */

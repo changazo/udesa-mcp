@@ -558,11 +558,13 @@ export const replyIntent: WriteIntent<typeof replyShape> = {
         const options: { name: string; value: string }[] = [{ name: "discussionsubscribe", value: input.subscribe ? "1" : "0" }];
         if (priv) options.push({ name: "private", value: "1" });
         const att = await planAttachments(ctx, forum, input.attachments, async () => (await canAdd(ctx, forum.id, -1)).cancreateattachment === true);
+        // Como el aviso: en un foro de suscripción forzada la respuesta le llega por correo a todo el curso (ADR-130).
+        const mailsEveryone = forum.forcesubscribe === 1 && !priv && !ctx.profile.policy.sandbox_course_ids.includes(input.course_id);
         return {
             intent: "forum_reply",
             capability: "reply_forum",
             course_id: input.course_id,
-            base_risk: "R2",
+            base_risk: mailsEveryone ? "R3" : "R2",
             summary: `Responder ${priv ? "en privado " : ""}en la discusión «${row.subject ?? row.name ?? input.discussion_id}» al post ${parent.id}.`,
             payload_preview: {
                 forum: { forum_id: forum.id, name: forum.name ?? null },
@@ -582,7 +584,11 @@ export const replyIntent: WriteIntent<typeof replyShape> = {
             ],
             preconditions: { description: "El post al que se responde no cambió.", versions: { [`post:${forum.id}:${input.discussion_id}:${parent.id}`]: parent.timemodified ?? null } },
             undo: { kind: "exacto", how: "Borrar la respuesta antes de que pase maxeditingtime evita el correo; después se puede borrar, pero el correo ya salió.", until: null },
-            warnings: ["Para armar el plan se leyó la discusión completa: en foros con seguimiento, Moodle marca sus posts como leídos (ADR-039).", ...att.warnings],
+            warnings: [
+                ...(mailsEveryone ? ["El foro tiene suscripción forzada: la respuesta les llega por correo a todos los participantes."] : []),
+                "Para armar el plan se leyó la discusión completa: en foros con seguimiento, Moodle marca sus posts como leídos (ADR-039).",
+                ...att.warnings,
+            ],
             items: [
                 {
                     item_id: "i1",

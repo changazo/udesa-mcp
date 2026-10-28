@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="es-AR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Funciones, paso a paso</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header class="top">
+    <div>
+      <div class="eyebrow">Python paso a paso</div>
+      <h1 id="title">Una función, paso a paso</h1>
+      <p class="intro">Recorré la ejecución ya registrada. El código es fijo: sólo podés avanzar y retroceder por sus estados.</p>
+    </div>
+    <div class="pill">Sólo lectura</div>
+  </header>
+
+  <div id="notice" class="notice" role="status" hidden></div>
+
+  <div class="layout">
+    <section class="panel" aria-labelledby="code-title">
+      <h2 id="code-title">Código</h2>
+      <ol class="code" id="code" aria-label="Código, con la línea marcada"></ol>
+    </section>
+    <section class="panel" aria-labelledby="memory-title">
+      <h2 id="memory-title">Estado de memoria</h2>
+      <div id="returned"></div>
+      <div id="frames" aria-live="polite"></div>
+      <p class="detail">La línea marcada es la <strong>próxima a ejecutar</strong>. Las variables muestran los valores ya establecidos.</p>
+    </section>
+  </div>
+
+  <section class="panel controls" aria-label="Controles de navegación">
+    <div class="step-head">
+      <div class="step-label" id="count">Cargando…</div>
+      <div class="muted" id="event"></div>
+    </div>
+    <input id="range" class="progress" type="range" min="0" max="0" value="0" aria-label="Posición en la ejecución">
+    <div class="buttons">
+      <button id="first" type="button">⟪ Inicio</button>
+      <button id="prev" type="button">← Anterior</button>
+      <button class="primary" id="next" type="button">Siguiente →</button>
+      <button id="last" type="button">Final ⟫</button>
+    </div>
+    <p class="steptext" id="message"></p>
+    <pre class="stdout" id="stdout" hidden></pre>
+  </section>
+
+  <footer class="foot" id="foot"></footer>
+</main>
+<script src="app.js" defer></script>
+</body>
+</html>

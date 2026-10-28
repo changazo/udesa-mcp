@@ -27,3 +27,5 @@ reports/live/
 .vercel/
 # .env.local de `vercel link` (token OIDC) y cualquier otro .env
 .env*
+__pycache__/
+.pytest_cache/

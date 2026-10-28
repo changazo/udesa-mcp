@@ -27,21 +27,19 @@ Cada resultado trae procedencia, cobertura y advertencias. Un error nunca se pre
 - calificación de tareas, foros y preguntas: a mano, con escala, rúbrica o guía, y con archivos de retroalimentación;
 - libro de calificaciones y asistencia;
 - cuestionarios: crear, importar preguntas, armarlos por páginas y secciones, overrides, estado de preguntas;
-- contenido: páginas, enlaces, etiquetas, archivos, foros y fechas de actividades;
+- contenido: páginas, enlaces (también incrustados), etiquetas, archivos, foros y fechas de actividades. Desde ChatGPT, los archivos que adjuntás o que genera la conversación se suben a recursos y carpetas, también en el remoto (ADR-129);
 - estructura: mostrar, mover, renombrar, secciones;
 - grupos, agrupamientos y elecciones de grupo;
 - cada tipo de elemento: carpetas, libros, wikis (también por grupo o individuales), glosarios, consultas, bases de datos, lecciones, encuestas y más ([docs/SANDBOX_ELEMENTOS.md](docs/SANDBOX_ELEMENTOS.md));
 - **contenido H5P generado por el MCP** (ADR-110 y 111): cuestionarios, presentaciones, libros, videos interactivos, escenarios ramificados, tarjetas, gráficos, líneas de tiempo y acordeones desde un esquema tipado, también en el remoto;
-- **laboratorio en Vercel** (ADR-116 y 117): ejercicios de Python con pruebas automáticas, incrustados o como actividad LTI con nota en el libro de calificaciones;
+- **laboratorio en Vercel** (ADR-116 y 117): ejercicios de Python con pruebas automáticas, incrustados o como actividad LTI con nota en el libro de calificaciones, y un visor paso a paso de ejecuciones de Python ya registradas;
 - borrados (R4), también en lote, de intentos de cuestionario y de entregas de estudiantes (ADR-119).
 
 **Reglas de las escrituras:**
 - Toda escritura se planifica primero (`campus_plan_*`), se ejecuta con `campus_execute_plan` y se verifica releyendo el Campus. Muchas se pueden deshacer.
 - Hasta 2000 escrituras por día (ADR-078).
 - No hay aprobación fuera del chat (ADR-061). Para R3 y R4 decide el humano: el agente le plantea la acción y sólo ejecuta con su aprobación, o el servidor se la pregunta por elicitación (ADR-118).
-- No se notifica a estudiantes reales (`allow_participant_notifications: false`). Excepciones:
-  - aprobar una entrada de glosario puede avisar al autor (ADR-089);
-  - avisos de calificación y mensajes privados a las cuentas de prueba de tu sandbox (`notifiable_user_ids`, ADR-115 y 120). El perfil publicado trae esa lista y la del sandbox vacías: se completan con los tuyos ([PROCESOS.md](docs/PROCESOS.md#escrituras)).
+- Notificaciones a participantes permitidas (`allow_participant_notifications: true`, ADR-130). Publicar o responder en Avisos (suscripción forzada) de un curso real y mandar un mensaje privado son R3: el agente te pide aprobación antes. Una calificación sólo avisa si se pide. Con `false`, sólo se notifica a las cuentas de prueba de tu sandbox (`notifiable_user_ids`, ADR-115 y 120). El perfil publicado trae esa lista y la del sandbox vacías: se completan con los tuyos ([PROCESOS.md](docs/PROCESOS.md#escrituras)).
 
 **Sesión web automática** (opcional, no recomendada; ADR-087, ADR-088 y ADR-127). Donde el keepalive no es viable, el MCP local y el remoto pueden iniciar sesión en la web solos, con la contraseña guardada y un dispositivo de confianza de 28 días (el MFA por correo se pide sólo al activarlo o renovarlo).
 

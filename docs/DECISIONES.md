@@ -137,6 +137,9 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [125](#adr-125--escrituras-en-todos-los-cursos-con-rol-de-escritura) | Escrituras en todos los cursos con rol de escritura | adoptada; modificada por ADR-126 |
 | [126](#adr-126--sin-escalada-de-riesgo-por-curso-real) | Sin escalada de riesgo por curso real | adoptada |
 | [127](#adr-127--login-web-automático-en-el-servidor-remoto) | Login web automático en el servidor remoto | adoptada como excepción explícita del dueño |
+| [128](#adr-128--recursos-incrustados-tipados-propuesta-no-adoptada) | Recursos incrustados tipados | propuesta |
+| [129](#adr-129--archivos-que-entrega-chatgpt-en-el-remoto) | Archivos que entrega ChatGPT en el remoto | adoptada |
+| [130](#adr-130--notificaciones-a-participantes-habilitadas) | Notificaciones a participantes habilitadas | adoptada |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -1994,6 +1997,7 @@ Reemplaza `include_content` de ADR-112. Errores explícitos cuando un modo no ex
 - **Primera mini-aplicación, `/apps/python/`:** ejercicios de Python con Pyodide 0.26.4 en un Web Worker. Tiene pruebas visibles y ocultas, corte a los 8 s (bucles infinitos) y la consigna en texto plano, con `código` resaltado y nunca HTML. Avisa el resultado a la página contenedora (`postMessage`) para la versión con nota (LTI).
 - **MCP:** `campus_plan_h5p_content` suma `python_exercise`, que arma un Iframe Embedder con la URL del laboratorio (`CAMPUS_LAB_BASE_URL` para cambiarla) y alto fijo. El campo de las pruebas se llama `input` porque la regla de herramientas no genéricas prohíbe claves como `args`.
 - La nota que muestra la app la calcula el navegador: sirve para practicar, no para calificar. La calificación queda para LTI (nivel 3), con la misma app.
+- **Segunda mini-aplicación, `/apps/python-trace/` (2026-10-28):** visor de solo lectura de una traza ya generada (contrato en `lab/apps/python-trace/CONTRATO.md`). No ejecuta Python ni recibe código. Elige la traza con `?traza=<nombre>`, y las trazas las genera la cátedra offline con `generar_traza.py`. Se inserta como URL con `display: embed` o con `iframe_embed`. El seguimiento lo dan los registros de Moodle (quién abrió y cuándo), sin LTI.
 
 **Prueba real:** en el navegador, la app pasó los casos de código inicial (0/3), solución correcta (3/3, con una prueba oculta) y bucle infinito (cortado y recuperado). En el sandbox, el ejercicio creado por el MCP se ve dentro del reproductor del Campus con Python cargado.
 
@@ -2156,7 +2160,7 @@ Falta la prueba con una cuenta de estudiante, que necesita su inicio de sesión.
 **En los cursos reales:**
 - **Riesgo:** el mismo que en el sandbox, sin escalada por curso real (ADR-126). R3 y R4 requieren la aprobación del usuario en el chat (ADR-118).
 - **Confirmación:** la confirmación en el cliente (`sandbox_confirmation: "cliente"`) vale sólo en el sandbox.
-- **Notificaciones:** `allow_participant_notifications: false`. Nada que avise a estudiantes reales: el foro de Avisos (suscripción forzada) queda bloqueado, las calificaciones no notifican y los mensajes privados sólo van a las cuentas de prueba del sandbox. Abrirlo es otra decisión.
+- **Notificaciones:** `allow_participant_notifications: false`. Nada que avise a estudiantes reales: el foro de Avisos (suscripción forzada) queda bloqueado, las calificaciones no notifican y los mensajes privados sólo van a las cuentas de prueba del sandbox. Abrirlo es otra decisión (se abrió en ADR-130).
 - **Límites diarios y freno por fallos:** los mismos, para todos los cursos juntos.
 - **Remoto:** usa el mismo perfil.
 
@@ -2202,14 +2206,41 @@ Falta la prueba con una cuenta de estudiante, que necesita su inicio de sesión.
 ## ADR-128 · Recursos incrustados tipados (propuesta, no adoptada)
 
 **Decisión propuesta:**
-- **Presentación de URL** (`display`: `automatic`, `embed`, `open`), comprobada contra el formulario del sitio antes del POST. Es la vía para mostrar Python Tutor dentro de Moodle.
+- **Presentación de URL** (`display`: `automatic`, `embed`, `open`), comprobada contra el formulario del sitio antes del POST. Es la vía para mostrar Python Tutor dentro de Moodle, que funciona como puente. El producto es el visor propio del laboratorio (ADR-116), que funciona en las dos vías.
 - **`iframe_embed`** (H5P) para insertar cualquier página https. Sólo la dirección, validada; nada de HTML. El plan advierte que el contenido lo controla otro sitio.
 - Ninguna de las dos da seguimiento: no llegan intentos ni progreso al Campus.
 
-**Descartado:** un tipo H5P propio para Python Tutor. Dentro del Iframe Embedder, Python Tutor no muestra el visualizador, y la causa no está identificada.
+**Descartado:** un tipo H5P propio para Python Tutor. El Iframe Embedder no puede entregar `=`, `&` ni `+` escapados, y Python Tutor pierde el código ([H5P_EXPLORACION.md](H5P_EXPLORACION.md)). Una página propia que reciba el código en base64url sí pasaría, pero requiere desplegarla en el laboratorio.
 
 **Riesgos:** la página incrustada la controla otro sitio y puede cambiar o bloquear la incrustación (en ese caso conviene `display: open`). Python Tutor ejecuta el código en sus servidores: sólo ejemplos públicos.
 
 **Validado en real** en un curso de pruebas: un enlace a Python Tutor con `display: embed` se ve dentro de Moodle; `iframe_embed` muestra una página que permite incrustarse y muestra el bloqueo de una que no lo permite.
 
 **Falta para adoptarla:** probar el deshacer de la presentación en el curso de pruebas.
+
+## ADR-129 · Archivos que entrega ChatGPT en el remoto
+
+**Fecha:** 2026-10-28 · **Estatus:** adoptada · **Origen:** el dueño pidió que desde ChatGPT se puedan subir PDFs a los cursos. El remoto los rechazaba porque sólo admitía rutas locales.
+
+**Decisión:**
+- `campus_plan_create_content` suma `files` (recurso, carpeta, actividad H5P) y `campus_plan_activity_files` suma `add_files`. Cada elemento es el objeto de ChatGPT `{download_url, file_id, mime_type?, file_name?}` (definición `ChatFile`). La herramienta lo declara en `_meta["openai/fileParams"]`, que es como ChatGPT sabe en qué campos entregar archivos. El esquema se publica como lo documenta OpenAI: `$defs`, `#/$defs/ChatFile` y `additionalProperties: false`. El SDK lo emite en draft-07 (`definitions`), y con esa forma ChatGPT mostraba el campo como texto y mandaba cadenas, así que se reescribe la respuesta de `tools/list` sólo en esas herramientas. Las rutas locales siguen igual en el servidor local.
+- **Al planificar,** el servidor baja cada archivo, lo valida y guarda los bytes aparte, por sha256 y con vencimiento a la hora (KV en el remoto, `blobs/` en local). El plan, que dura 30 días, sólo lleva nombre, tamaño, hash y `file_id`. **Al ejecutar,** recupera los bytes y comprueba el hash. Si vencieron, devuelve `PLAN_STALE` y no sube nada.
+- **Salvaguardas de la descarga:** sólo https y puerto 443, sin credenciales en el enlace. El host tiene que resolver sólo a direcciones públicas (nada local, privado, de enlace ni de documentación), y cada redirección se revisa igual, hasta 3. El tamaño se limita por encabezado y por lectura: en el remoto, 20 MB por archivo y 40 MB por plan, porque todo el plan se sube a Moodle en una invocación de 60 s. En local rige el límite del perfil. En el KV, los bytes van en trozos de 4 MB, porque Upstash admite 10 MB por pedido y el archivo viaja en base64. Un `.pdf` tiene que empezar con `%PDF-` y un `.h5p` o un Office moderno tiene que ser ZIP. El enlace firmado nunca se registra ni aparece en errores. Un enlace vencido (401/403/404/410) es `PLAN_STALE`.
+
+**Límites conocidos:** `openai/fileParams` es una extensión de ChatGPT, así que Claude y otros clientes por el remoto siguen sin poder subir archivos. ChatGPT le muestra al modelo el campo como `string[]`: el modelo pone la ruta del archivo y la plataforma la convierte en el objeto de descarga. La resolución DNS se revisa antes de pedir, pero no se fija la dirección para el pedido.
+
+**Validado en real** desde ChatGPT en web y en Android: PDFs adjuntados, generados por ChatGPT y traídos desde Google Drive por su conector, en recursos y en carpetas (con `add_files`). Todo con `aplicado_verificado`.
+
+**Tests:** `chat-files.test.ts` (direcciones, descarga, redirecciones, tamaño, tipo, enlace vencido, sin filtrar el enlace, bytes en el KV y en trozos) y `write-chat-files.test.ts` (recurso, carpeta y `add_files` de punta a punta en modo remoto, bytes vencidos, rechazos y `_meta` con el esquema).
+
+## ADR-130 · Notificaciones a participantes habilitadas
+
+**Fecha:** 2026-10-28 · **Estatus:** adoptada · **Origen:** el dueño. Desde ChatGPT, publicar en Avisos fallaba con `WRITE_NOT_ALLOWED` («suscripción forzada… allow_participant_notifications=false»). La restricción era de la etapa de desarrollo y había quedado activa en producción.
+
+**Decisión:**
+- El perfil de escritura de ejemplo pasa a `allow_participant_notifications: true`. Se puede publicar y responder en foros con suscripción forzada o inicial (Avisos), enviar mensajes privados a cualquier participante, pedir que una calificación avise al estudiante, calificar intentos de estudiantes y tomar asistencia en actividades con avisos por correo.
+- Se mantienen los controles de riesgo. En un curso real, un aviso en un foro de suscripción forzada es R3, y ahora también una respuesta no privada, porque le llega por correo a todo el curso. Un mensaje privado es R3. R3 exige que el agente presente el plan y reciba la aprobación textual del usuario (ADR-118). `notify_students_default` sigue en `false`: una calificación sólo avisa si se pide.
+- En el curso de pruebas sigue la regla de no notificar a participantes reales.
+
+**Tests:** el perfil de ejemplo carga con notificaciones habilitadas, y una respuesta en un foro de suscripción forzada de un curso real es R3.
+

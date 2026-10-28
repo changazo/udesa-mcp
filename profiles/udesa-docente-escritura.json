@@ -20,7 +20,7 @@
     "human_in_the_loop_from_risk": "R3",
     "audit_teacher_text": false,
     "sandbox_confirmation": "cliente",
-    "allow_participant_notifications": false,
+    "allow_participant_notifications": true,
     "notifiable_user_ids": [],
     "confirmation": {
       "dialog": true,

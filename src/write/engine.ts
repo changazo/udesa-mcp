@@ -31,7 +31,11 @@ import { flattenParams } from "../moodle/serialize.js";
 import { checkWriteAjax, checkWriteForm, checkWriteFormQuery, checkWriteRest } from "./functions.js";
 import type { WebWriter } from "./web.js";
 import type { PlanItem } from "./plan.js";
-import { loadPlanFiles } from "./files.js";
+import { loadPlanFiles, MAX_PLAN_FILES, type PlanFile } from "./files.js";
+import { CHAT_FILE_TTL_S, describeChatFile, downloadChatFile, REMOTE_MAX_CHAT_FILE_BYTES, REMOTE_MAX_CHAT_PLAN_BYTES, type ChatFileDeps, type ChatFileRef } from "./chat-files.js";
+
+/** Tope propio para archivos del cliente (el mismo que los locales de contenido). */
+const MAX_CHAT_FILE_BYTES = 50 * 1024 * 1024;
 
 /** Freno ante fallos (§5.8). */
 export const BRAKE_THRESHOLD = 3;
@@ -64,6 +68,8 @@ export interface WriteEngineDeps {
      * el riesgo tiene un techo propio y no hay archivos locales.
      */
     remote?: { approvalUrl: (planId: string) => string; maxRisk: Risk };
+    /** Descarga de archivos del cliente (tests: fetch y DNS simulados). */
+    chatFiles?: ChatFileDeps;
 }
 
 type WorkingItem = Omit<ItemResult, "outcome"> & { outcome: ItemOutcome | "pendiente_verificar" };
@@ -170,10 +176,41 @@ export class WriteEngine {
         await this.deps.read.scope.assertWriter(input.course_id);
         this.assertGrant(input.course_id, intent.capability);
         if (this.deps.remote && ([input.attachments, input.file_paths, input.add_file_paths].some((v) => Array.isArray(v) && v.length) || input.file_path !== undefined)) {
-            throw new CampusError("WRITE_NOT_ALLOWED", "En el servidor remoto no hay archivos locales: adjuntos e importaciones de archivos sólo desde el servidor local (udesa-campus-escritura).");
+            throw new CampusError(
+                "WRITE_NOT_ALLOWED",
+                `En el servidor remoto no hay archivos locales.${intent.fileParams?.length ? ` Pasá los archivos en ${intent.fileParams.join(" o ")} (ChatGPT los entrega así);` : ""} las rutas locales sólo funcionan en el servidor local (udesa-campus-escritura).`,
+            );
         }
+        if (intent.fileParams?.length) input = { ...input, chat_files: await this.receiveChatFiles(intent.fileParams, input) };
         const draft = await intent.plan(input, this.ctx());
         return this.storeDraft(draft, client);
+    }
+
+    /**
+     * Archivos que entregó el cliente en los campos de archivo (ChatGPT, `openai/fileParams`): se bajan y
+     * validan ahora, y los bytes quedan en el almacén con vencimiento corto. El plan sólo lleva su descripción.
+     */
+    private async receiveChatFiles(fields: readonly string[], input: Record<string, unknown>): Promise<Record<string, PlanFile[]>> {
+        const max = Math.min(MAX_CHAT_FILE_BYTES, this.deps.profile.read_profile.limits.max_file_bytes, this.deps.remote ? REMOTE_MAX_CHAT_FILE_BYTES : Infinity);
+        const out: Record<string, PlanFile[]> = {};
+        let total = 0;
+        for (const field of fields) {
+            const refs = input[field] as ChatFileRef[] | undefined;
+            if (!refs?.length) continue;
+            if (refs.length > MAX_PLAN_FILES) throw new CampusError("WRITE_NOT_ALLOWED", `Como máximo ${MAX_PLAN_FILES} archivos por plan.`);
+            const files: PlanFile[] = [];
+            for (const ref of refs) {
+                const { filename, data, host } = await downloadChatFile(ref, max, this.deps.chatFiles);
+                total += data.length;
+                if (this.deps.remote && total > REMOTE_MAX_CHAT_PLAN_BYTES) throw new CampusError("WRITE_NOT_ALLOWED", `Los archivos del plan suman más de ${REMOTE_MAX_CHAT_PLAN_BYTES / 1024 / 1024} MB: en el remoto, repartilos en varios planes.`);
+                if (files.some((f) => f.filename.toLowerCase() === filename.toLowerCase())) throw new CampusError("WRITE_NOT_ALLOWED", `Dos archivos se llaman ${filename}: Moodle no sobrescribe y descartaría uno.`);
+                const file = describeChatFile(filename, data, ref, host);
+                await this.deps.store.putBlob(file.sha256, data, CHAT_FILE_TTL_S);
+                files.push(file);
+            }
+            out[field] = files;
+        }
+        return out;
     }
 
     private async storeDraft(draft: PlanDraft, client: string) {
@@ -181,7 +218,7 @@ export class WriteEngine {
         // Cada llamada del plan pasa ya la allowlist y su validador: un plan nunca guarda algo que el transporte rechazaría.
         for (const item of draft.items) checkItem(item, this.deps.profile.read_profile.site_url);
         // Archivos generados por el servidor (ADR-110) viajan en el plan: sí funcionan en el remoto.
-        if (this.deps.remote && draft.items.some((i) => i.uploads && i.uploads.files.some((f) => f.inline_base64 === undefined))) throw new CampusError("WRITE_NOT_ALLOWED", "En el servidor remoto no hay archivos locales.");
+        if (this.deps.remote && draft.items.some((i) => i.uploads && i.uploads.files.some((f) => f.inline_base64 === undefined && !f.blob))) throw new CampusError("WRITE_NOT_ALLOWED", "En el servidor remoto no hay archivos locales.");
         this.assertGrant(draft.course_id, draft.capability);
         const lim = this.policy.limits;
         if (draft.items.length > lim.max_items_per_plan) {
@@ -448,6 +485,14 @@ export class WriteEngine {
 
         // Archivos del plan: tienen que ser los mismos que vio el humano (por hash), antes de escribir nada.
         try {
+            // Los archivos entregados por el cliente se traen del almacén (sólo en memoria; el plan guardado no cambia).
+            for (const item of plan.items) {
+                for (const f of item.uploads?.files ?? []) {
+                    if (!f.blob) continue;
+                    const data = await this.deps.store.getBlob(f.sha256);
+                    if (data) f.inline_base64 = data.toString("base64");
+                }
+            }
             for (const item of plan.items) if (item.uploads) loadPlanFiles(item.uploads.files);
         } catch (e) {
             if (e instanceof CampusError && e.code === "PLAN_STALE") {

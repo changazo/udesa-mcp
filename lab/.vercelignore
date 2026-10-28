@@ -1,0 +1,5 @@
+# Sólo se publica lo que corre en el navegador; el generador, sus pruebas y las notas quedan en el repo.
+apps/python-trace/*.md
+apps/python-trace/*.py
+apps/python-trace/ejemplos
+apps/python-trace/__pycache__

@@ -15,6 +15,8 @@ export interface PlanFile {
     sha256: string;
     /** Archivo GENERADO por el servidor (ADR-110): viaja en el plan firmado, en base64. Sin ruta local. */
     inline_base64?: string;
+    /** Archivo que entregó el cliente (ChatGPT): los bytes viven en el almacén con vencimiento corto, por hash. */
+    blob?: boolean;
 }
 
 /** Describe un archivo generado por el servidor (por ejemplo, un paquete H5P): va dentro del plan. */
@@ -26,7 +28,7 @@ export function describeGeneratedFile(filename: string, data: Buffer, maxBytes: 
 }
 
 export const MAX_PLAN_FILES = 10;
-const SAFE_NAME = /^[^\\/:*?"<>|\u0000-\u001f]{1,200}$/;
+export const SAFE_NAME = /^[^\\/:*?"<>|\u0000-\u001f]{1,200}$/;
 
 const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 
@@ -54,12 +56,16 @@ export function describeLocalFiles(paths: readonly string[], maxBytes: number, m
     return out;
 }
 
-/** Contenido de los archivos tal como se planificaron; si alguno cambió, PLAN_STALE. */
+/**
+ * Contenido de los archivos tal como se planificaron; si alguno cambió, PLAN_STALE. Los `blob` llegan
+ * con `inline_base64` cargado por el motor desde el almacén; si ya venció, cuentan como cambiados.
+ */
 export function loadPlanFiles(files: readonly PlanFile[]): { filename: string; data: Buffer }[] {
     const changed: string[] = [];
     const out = files.map((f) => {
         let data: Buffer;
         try {
+            if (f.blob && f.inline_base64 === undefined) throw new Error("vencido");
             data = f.inline_base64 !== undefined ? Buffer.from(f.inline_base64, "base64") : readFileSync(f.path);
         } catch {
             changed.push(f.filename);

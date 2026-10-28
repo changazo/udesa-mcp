@@ -1,0 +1,668 @@
+{
+  "schema_version": "python-trace/1",
+  "trace_id": "1ba6bfea48d847840a9865b99b48937cf1ca2096e791f3e1026b6e7b96b5c4fc",
+  "python_version": "3.13.0",
+  "source_hash": "3c6d5ebb9feef869ef4f2122583e783a0caf9dfc52050a3b8f802fc3d5a65c10",
+  "source": "def sumar_pares(numeros):\n    total = 0\n    for numero in numeros:\n        if numero % 2 == 0:\n            total = total + numero\n    return total\n\nresultado = sumar_pares([2, 3, 4])\n",
+  "metadata": {
+    "title": "Funciones: sumar pares",
+    "semantics": "La línea marcada es la próxima a ejecutar: sus variables muestran el estado anterior a esa línea. En un evento de retorno se muestra el valor devuelto.",
+    "outcome": "finished",
+    "error": null,
+    "truncated": false,
+    "max_events": 200
+  },
+  "events": [
+    {
+      "step": 0,
+      "event": "line",
+      "line": 1,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 1,
+          "locals": []
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 1,
+      "event": "line",
+      "line": 8,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 2,
+      "event": "call",
+      "line": 1,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 1,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 3,
+      "event": "line",
+      "line": 2,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 2,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 4,
+      "event": "line",
+      "line": 3,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 3,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "0",
+              "history": [
+                "0"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 5,
+      "event": "line",
+      "line": 4,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 4,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "0",
+              "history": [
+                "0"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "2",
+              "history": [
+                "2"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 6,
+      "event": "line",
+      "line": 5,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 5,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "0",
+              "history": [
+                "0"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "2",
+              "history": [
+                "2"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 7,
+      "event": "line",
+      "line": 3,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 3,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "2",
+              "history": [
+                "0",
+                "2"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "2",
+              "history": [
+                "2"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 8,
+      "event": "line",
+      "line": 4,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 4,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "2",
+              "history": [
+                "0",
+                "2"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "3",
+              "history": [
+                "2",
+                "3"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 9,
+      "event": "line",
+      "line": 3,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 3,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "2",
+              "history": [
+                "0",
+                "2"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "3",
+              "history": [
+                "2",
+                "3"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 10,
+      "event": "line",
+      "line": 4,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 4,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "2",
+              "history": [
+                "0",
+                "2"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "4",
+              "history": [
+                "2",
+                "3",
+                "4"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 11,
+      "event": "line",
+      "line": 5,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 5,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "2",
+              "history": [
+                "0",
+                "2"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "4",
+              "history": [
+                "2",
+                "3",
+                "4"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 12,
+      "event": "line",
+      "line": 3,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 3,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "6",
+              "history": [
+                "0",
+                "2",
+                "6"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "4",
+              "history": [
+                "2",
+                "3",
+                "4"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 13,
+      "event": "line",
+      "line": 6,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 6,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "6",
+              "history": [
+                "0",
+                "2",
+                "6"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "4",
+              "history": [
+                "2",
+                "3",
+                "4"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    },
+    {
+      "step": 14,
+      "event": "return",
+      "line": 6,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": []
+        },
+        {
+          "frame_id": "f2",
+          "function": "sumar_pares",
+          "line": 6,
+          "locals": [
+            {
+              "name": "numeros",
+              "type": "list",
+              "value": "[2, 3, 4]",
+              "history": [
+                "[2, 3, 4]"
+              ]
+            },
+            {
+              "name": "total",
+              "type": "int",
+              "value": "6",
+              "history": [
+                "0",
+                "2",
+                "6"
+              ]
+            },
+            {
+              "name": "numero",
+              "type": "int",
+              "value": "4",
+              "history": [
+                "2",
+                "3",
+                "4"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": "6",
+      "exception": null
+    },
+    {
+      "step": 15,
+      "event": "return",
+      "line": 8,
+      "stack": [
+        {
+          "frame_id": "f1",
+          "function": "global",
+          "line": 8,
+          "locals": [
+            {
+              "name": "resultado",
+              "type": "int",
+              "value": "6",
+              "history": [
+                "6"
+              ]
+            }
+          ]
+        }
+      ],
+      "stdout": "",
+      "return_value": null,
+      "exception": null
+    }
+  ]
+}

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { CampusError } from "../../errors.js";
 import type { IntentContext, Interpretation, ItemVerification, Presence, WriteIntent } from "../intent.js";
 import type { Plan, PlanDraft, PlanItem } from "../plan.js";
+import { ChatFile } from "../chat-files.js";
 import { describeLocalFiles, type PlanFile } from "../files.js";
 import { folderFiles } from "./content.js";
 import { requireH5pPackage } from "./h5p-package.js";
@@ -82,7 +83,7 @@ export function buildActivityFilesDraft(courseId: number, m: Awaited<ReturnType<
     const kind = m.modname as Kind;
     const rootNames = new Set(prior.filter((e) => !e.startsWith("/")).map(nameOf));
     if (kind !== "folder") {
-        if (add.length !== 1 || remove.length) throw new CampusError("WRITE_NOT_ALLOWED", `En ${kind === "resource" ? "un archivo (recurso)" : "una actividad H5P"} sólo se reemplaza su archivo: indicá exactamente un add_file_paths y ningún remove_filenames.`);
+        if (add.length !== 1 || remove.length) throw new CampusError("WRITE_NOT_ALLOWED", `En ${kind === "resource" ? "un archivo (recurso)" : "una actividad H5P"} sólo se reemplaza su archivo: indicá exactamente un archivo (add_file_paths o add_files) y ningún remove_filenames.`);
         if (kind === "h5pactivity" && !/\.h5p$/i.test(add[0]!.filename)) throw new CampusError("WRITE_NOT_ALLOWED", "Una actividad H5P necesita un paquete .h5p.");
         remove = [...rootNames];
         if (!remove.length || prior.some((e) => e.startsWith("/"))) throw new CampusError("UNEXPECTED_RESPONSE", `${kind === "resource" ? "El recurso" : "La actividad H5P"} no tiene un archivo en la raíz para reemplazar.`);
@@ -134,6 +135,12 @@ const shape = {
     course_id: z.number().int().positive(),
     course_module_id: z.number().int().positive().describe("cmid de una carpeta, de un archivo (recurso) o de una actividad H5P."),
     add_file_paths: z.array(z.string().min(1).max(1000)).max(10).optional().describe("Rutas ABSOLUTAS de archivos locales que indicó el humano (sólo servidor local). En un recurso o una actividad H5P, exactamente una: reemplaza su archivo (H5P: un paquete .h5p)."),
+    add_files: z
+        .array(ChatFile)
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("Archivos que entrega el cliente (ChatGPT: adjuntos o generados en la conversación), en lugar de add_file_paths; funciona también en el remoto. En un recurso o una actividad H5P, exactamente uno."),
     remove_filenames: z.array(z.string().min(1).max(255)).max(50).optional().describe("Carpeta: nombres EXACTOS de archivos de la raíz a quitar (se borran)."),
 };
 
@@ -141,8 +148,9 @@ export const activityFilesIntent: WriteIntent<typeof shape> = {
     name: "activity_files",
     title: "Plan: agregar o quitar archivos de una carpeta, o reemplazar el archivo de un recurso o el paquete de una actividad H5P",
     description:
-        "Arma el plan para agregar archivos locales a una carpeta, quitar archivos de su raíz (por nombre) o reemplazar el archivo de un recurso o el paquete .h5p de una actividad H5P. Quitar o reemplazar BORRA el archivo anterior (R3, sin deshacer). Agregar requiere el servidor local. No escribe.",
+        "Arma el plan para agregar archivos a una carpeta (locales con add_file_paths, o los que entrega ChatGPT con add_files), quitar archivos de su raíz (por nombre) o reemplazar el archivo de un recurso o el paquete .h5p de una actividad H5P. Quitar o reemplazar BORRA el archivo anterior (R3, sin deshacer). Las rutas locales requieren el servidor local. No escribe.",
     inputShape: shape,
+    fileParams: ["add_files"],
     capability: "edit_activity",
     synthetic_only: false,
     readVersions,
@@ -151,11 +159,14 @@ export const activityFilesIntent: WriteIntent<typeof shape> = {
     reconcile,
     async plan(input, ctx) {
         const add = input.add_file_paths ?? [];
+        // Archivos del cliente (ChatGPT): el motor ya los bajó y validó (`add_files` → `chat_files.add_files`).
+        const chat = (input as { chat_files?: Record<string, PlanFile[]> }).chat_files?.add_files ?? [];
         const remove = input.remove_filenames ?? [];
-        if (!add.length && !remove.length) throw new CampusError("WRITE_NOT_ALLOWED", "Indicá add_file_paths o remove_filenames.");
+        if (add.length && input.add_files) throw new CampusError("WRITE_NOT_ALLOWED", "Indicá add_file_paths o add_files, no los dos.");
+        if (!add.length && !chat.length && !remove.length) throw new CampusError("WRITE_NOT_ALLOWED", "Indicá add_file_paths, add_files o remove_filenames.");
         const m = await moduleOf(ctx, input.course_id, input.course_module_id);
         if (m.modname !== "folder" && m.modname !== "resource" && m.modname !== "h5pactivity") throw new CampusError("WRITE_NOT_ALLOWED", `La actividad ${m.id} no es una carpeta, un archivo ni una actividad H5P (es ${m.modname}).`);
-        const files = add.length ? describeLocalFiles(add, Math.min(MAX_FILE_BYTES, ctx.profile.read_profile.limits.max_file_bytes), 10) : [];
+        const files = chat.length ? chat : add.length ? describeLocalFiles(add, Math.min(MAX_FILE_BYTES, ctx.profile.read_profile.limits.max_file_bytes), 10) : [];
         return buildActivityFilesDraft(input.course_id, m, await filesOf(ctx, input.course_id, m), files, remove, null);
     },
     async undo(plan, result, ctx) {

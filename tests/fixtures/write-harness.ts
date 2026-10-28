@@ -1,4 +1,5 @@
 import { mkdtempSync } from "node:fs";
+import type { ChatFileDeps } from "../../src/write/chat-files.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -69,7 +70,7 @@ export interface WriteHarness {
 }
 
 /** App de escritura completa contra el Moodle sintético, con estado en un directorio temporal. */
-export async function makeWriteHarness(opts: { policy?: Record<string, unknown>; loggedIn?: boolean; dir?: string; remote?: boolean } = {}): Promise<WriteHarness> {
+export async function makeWriteHarness(opts: { policy?: Record<string, unknown>; loggedIn?: boolean; dir?: string; remote?: boolean; chatFiles?: ChatFileDeps } = {}): Promise<WriteHarness> {
     const fake = new FakeMoodle();
     const markers = new SyntheticMarkers(fake);
     const forums = new SyntheticForums(fake);
@@ -93,6 +94,7 @@ export async function makeWriteHarness(opts: { policy?: Record<string, unknown>;
         webSource: new MemoryWebSessionSource(webSnapshot()),
         webRenewHint: "renovar (test)",
         ...(opts.remote ? { remote: { approvalUrl: (id: string) => `https://remoto.test/aprobar/${id}`, maxRisk: "R3" as const } } : {}),
+        ...(opts.chatFiles ? { chatFiles: opts.chatFiles } : {}),
     });
     if (opts.loggedIn ?? true) await app.read.session.adoptCandidate(VALID_TOKEN, "native");
     return { fake, markers, forums, w2, att, app, dir, clock, confirmer, secrets, logs };

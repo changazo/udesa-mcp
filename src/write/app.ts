@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { ChatFileDeps } from "./chat-files.js";
 import type { Renderer } from "../documents/render.js";
 import type { DownloadLinks } from "../remote/download-links.js";
 import { createApp } from "../app.js";
@@ -124,6 +125,8 @@ export interface WriteAppDeps {
     remote?: { approvalUrl: (planId: string) => string; maxRisk: Risk };
     /** Canal fuera de banda del servidor MCP (por defecto, diálogo de Windows si el perfil lo habilita). */
     confirmer?: Confirmer;
+    /** Descarga de archivos que entrega el cliente (tests: fetch y DNS simulados). */
+    chatFiles?: ChatFileDeps;
 }
 
 /** Raíz de composición del modo escritura: núcleo de lectura (mismo token) + núcleo de escritura. */
@@ -154,7 +157,7 @@ export function createWriteApp(deps: WriteAppDeps) {
     const signer = new PlanSigner(deps.secrets, signingAccount(deps.profile.profile_id));
     const intents = availableIntents(deps.profile, { remote: !!deps.remote });
     const web = new WebWriter(read.web, deps.logger);
-    const engine = new WriteEngine({ profile: deps.profile, store, signer, transport, web, read, intents, logger: deps.logger, now: deps.now, remote: deps.remote });
+    const engine = new WriteEngine({ profile: deps.profile, store, signer, transport, web, read, intents, logger: deps.logger, now: deps.now, remote: deps.remote, chatFiles: deps.chatFiles });
     const c = deps.profile.policy.confirmation;
     const confirmer = deps.confirmer ?? (c.dialog ? new WindowsDialogConfirmer(c.dialog_timeout_seconds * 1000) : new NoOutOfBandConfirmer("El diálogo está deshabilitado en el perfil: aprobá desde la terminal."));
     const writeDeps = { engine, confirmer, intents, logger: deps.logger, mode: deps.remote ? ("remoto" as const) : ("local" as const) };
