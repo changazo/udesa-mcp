@@ -1,39 +1,40 @@
 <!doctype html>
 <!-- Plantilla de la imagen social (1280×640) y del banner del README (1280×320). Se renderiza con
-     Chrome sin interfaz: ver assets/src/render.ps1. Colores tomados del logo. -->
+     Chrome sin interfaz: ver assets/src/render.ps1. Misma tipografía (Libertinus, OFL, en fonts/) y
+     paleta que el sitio. -->
 <html lang="es">
 <head>
 <meta charset="utf-8">
 <style>
-  :root { --green: #329C32; --blue: #014A94; --pink: #C887B9; --ink: #1d2433; --muted: #5b6475; }
+  @font-face { font-family: "Libertinus Serif"; src: url("fonts/libertinus-serif-latin-600-normal.woff2") format("woff2"); font-weight: 600; }
+  @font-face { font-family: "Libertinus Serif"; src: url("fonts/libertinus-serif-latin-400-normal.woff2") format("woff2"); font-weight: 400; }
+  @font-face { font-family: "Libertinus Sans"; src: url("fonts/libertinus-sans-latin-700-normal.woff2") format("woff2"); font-weight: 700; }
+  @font-face { font-family: "Libertinus Sans"; src: url("fonts/libertinus-sans-latin-400-normal.woff2") format("woff2"); font-weight: 400; }
   * { margin: 0; box-sizing: border-box; }
   html, body { width: 1280px; height: var(--h); overflow: hidden; }
-  body {
-    font-family: "Segoe UI", system-ui, sans-serif;
-    background: #fff;
-    display: flex; align-items: center; justify-content: center; gap: var(--gap);
-    position: relative;
-  }
-  body::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 10px;
-    background: linear-gradient(90deg, var(--blue) 0 60%, var(--green) 60% 90%, var(--pink) 90%); }
+  body { background: #fff; color: #122535; font-family: "Libertinus Serif", serif; position: relative; display: flex; align-items: center; justify-content: center; gap: var(--gap); padding-bottom: var(--bar); }
   img { width: var(--logo); height: var(--logo); }
-  .text { display: flex; flex-direction: column; gap: var(--tgap); }
-  h1 { font-size: var(--title); font-weight: 700; color: var(--blue); letter-spacing: -0.02em; line-height: 1; }
-  h1 span { color: var(--green); }
-  .sub { font-size: var(--sub); color: var(--ink); font-weight: 500; }
-  .meta { display: flex; align-items: center; gap: 14px; font-size: var(--small); color: var(--muted); }
-  .pill { border: 2px solid var(--pink); color: #8E4F80; background: #FAF1F7; border-radius: 999px; padding: 4px 16px; font-weight: 600; }
-  body.social { --h: 640px; --gap: 64px; --logo: 400px; --title: 104px; --sub: 40px; --small: 26px; --tgap: 22px; }
-  body.banner { --h: 320px; padding-bottom: 10px; --gap: 48px; --logo: 280px; --title: 88px; --sub: 34px; --small: 22px; --tgap: 16px; }
+  .pill { display: inline-block; border: 2px solid #c887b9; background: #faf1f7; color: #7c3f6f; border-radius: 999px; padding: 3px 16px; font: 700 var(--pill) "Libertinus Sans", sans-serif; letter-spacing: 0.03em; margin-bottom: var(--pgap); }
+  h1 { font-weight: 600; font-size: var(--title); line-height: 1; letter-spacing: -0.025em; }
+  h1 b { font-weight: 600; color: #00529b; }
+  p { margin-top: var(--tgap); font-size: var(--tag); line-height: 1.2; color: #353535; letter-spacing: -0.005em; }
+  .sub { margin-top: var(--sgap); font: 400 var(--small) "Libertinus Sans", sans-serif; color: #656f77; letter-spacing: 0.01em; }
+  .bar { position: absolute; left: 0; right: 0; bottom: 0; height: var(--bar); display: flex; }
+  .bar i:nth-child(1) { flex: 6; background: #00529b; } .bar i:nth-child(2) { flex: 3; background: #2da343; } .bar i:nth-child(3) { flex: 1; background: #c887b9; }
+  body.social { --h: 640px; --gap: 64px; --logo: 360px; --title: 110px; --tag: 42px; --small: 27px; --pill: 24px; --pgap: 26px; --tgap: 22px; --sgap: 18px; --bar: 18px; }
+  body.banner { --h: 320px; --gap: 48px; --logo: 250px; --title: 84px; --tag: 32px; --small: 21px; --pill: 18px; --pgap: 14px; --tgap: 12px; --sgap: 10px; --bar: 10px; }
+  body.banner p br { display: none; }
 </style>
 </head>
 <body>
 <img src="../logo.png" alt="">
-<div class="text">
-  <h1>UdeSA <span>MCP</span></h1>
-  <p class="sub">Campus Virtual · Moodle</p>
-  <p class="meta"><span class="pill">No oficial</span><span>Tus cursos, con lectura y escritura según tu rol</span></p>
+<div>
+  <span class="pill">No oficial</span>
+  <h1>UdeSA <b>MCP</b></h1>
+  <p>Tu Campus Virtual,<br> desde tu asistente.</p>
+  <div class="sub">Para estudiantes y docentes · Código abierto</div>
 </div>
+<div class="bar"><i></i><i></i><i></i></div>
 <script>document.body.className = location.hash.slice(1) || "social";</script>
 </body>
 </html>

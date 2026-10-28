@@ -25,6 +25,10 @@ Versiones exactas en `package-lock.json`. Directas: `@modelcontextprotocol/sdk` 
 
 `tests/fixtures/h5p/*.json` reproduce la semántica y la traducción al castellano de bibliotecas H5P (Joubel AS / H5P Group y colaboradores), con licencia MIT. Texto completo en [tests/fixtures/h5p/LICENSE](tests/fixtures/h5p/LICENSE).
 
+## Tipografía
+
+Las imágenes de `assets/` usan Libertinus Serif y Libertinus Sans (© The Libertinus Project Authors; archivos web de Fontsource), con licencia SIL Open Font License 1.1. Los `.woff2` y el texto de la licencia están en [assets/src/fonts/](assets/src/fonts/OFL.txt).
+
 ## Código propio
 
 Apache-2.0: ver [LICENSE](LICENSE) y [NOTICE](NOTICE). «UdeSA», «Universidad de San Andrés» y su emblema son marcas de la Universidad de San Andrés y no están cubiertas por esta licencia.
