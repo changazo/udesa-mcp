@@ -140,6 +140,7 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [128](#adr-128--recursos-incrustados-tipados-propuesta-no-adoptada) | Recursos incrustados tipados | propuesta |
 | [129](#adr-129--archivos-que-entrega-chatgpt-en-el-remoto) | Archivos que entrega ChatGPT en el remoto | adoptada |
 | [130](#adr-130--notificaciones-a-participantes-habilitadas) | Notificaciones a participantes habilitadas | adoptada |
+| [131](#adr-131--presentación-de-archivos-display) | Presentación de archivos (`display`) | adoptada |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -2244,3 +2245,20 @@ Falta la prueba con una cuenta de estudiante, que necesita su inicio de sesión.
 
 **Tests:** el perfil de ejemplo carga con notificaciones habilitadas, y una respuesta en un foro de suscripción forzada de un curso real es R3.
 
+## ADR-131 · Presentación de archivos (`display`)
+
+**Fecha:** 2026-10-29 · **Estatus:** adoptada · **Origen:** el dueño pidió elegir cómo se abre un archivo (Apariencia → Mostrar) al crearlo y en sus ajustes. `campus_plan_activity_settings` rechazaba `display` en un recurso con `WRITE_NOT_ALLOWED`: el límite era del catálogo cerrado del MCP, no de Moodle.
+
+**Decisión:**
+- **Valores** (`RESOURCELIB_DISPLAY_*`, definidos una vez en `settings-catalog.ts` y compartidos por el ajuste y el alta): `automatic` 0, `embed` 1, `new_window` 3, `force_download` 4, `open` 5 y `popup` 6. `open` lo abre el navegador directo; `new_window` abre otra ventana completa. El marco (2) no se ofrece en el sitio y no se puede pedir: sólo se restaura al deshacer. El enlace (URL) conserva sus tres valores.
+- **Ajuste** (`campus_plan_activity_settings`): entrada `display` en el catálogo de `resource`. Se envía sólo ese campo y el resto del formulario vuelve tal cual. Se verifica releyendo el formulario. El plan muestra antes y después, crudos y con nombre (`before_name`, `after_name`).
+- **Alta** (`campus_plan_create_content`): `display` opcional también para `type=resource`. Las presentaciones de un archivo no valen para un enlace. Sin `display` queda el valor por defecto del sitio y no se verifica.
+- **Sólo lo que el sitio ofrece** (marca `offered_only` del catálogo, para enlaces y archivos). Antes de enviar, el valor tiene que figurar en el selector del formulario: el de edición para un ajuste y el de alta (ruta `modedit_add_form`, antes `modedit_url_add_form`) para crear. Vale también para el deshacer. El selector de Moodle descarta en silencio un valor que no ofrece, y Moodle ofrece las presentaciones habilitadas más la actual. Por eso un valor anterior que el sitio ya no habilita (el marco, por ejemplo) no se puede restaurar: el deshacer se rechaza antes de enviar, en lugar de guardar otra cosa.
+
+**Consecuencias en Moodle:**
+- Cada guardado de un recurso incrementa `revision`, y con eso cambia la URL del archivo (`/content/<revision>/`). El archivo es el mismo.
+- `displayoptions` depende de la presentación: `printintro` sólo con `automatic` y `embed`, y el tamaño de la ventana (620 × 450) sólo con `popup`. Moodle lo recalcula en cada guardado.
+
+**Tests:** `write-resource-display.test.ts` (9): valores del catálogo, las seis presentaciones con los demás campos intactos, de `force_download` a `open` con su deshacer, el marco restaurable sólo si el formulario lo ofrece, rechazos sin enviar, el alta con y sin `display`, y valores de archivo rechazados en un enlace. `write-url-display.test.ts` sigue en verde.
+
+**Validado en real** en el curso de pruebas, por el flujo MCP: el alta con `open` y sin `display` (queda el valor por defecto del sitio, forzar descarga), las seis presentaciones con el archivo y los demás ajustes intactos, y de `force_download` a `open` con su deshacer. Todo `aplicado_verificado`. Lo que recibe el navegador coincide con cada presentación: `open` redirige al archivo servido `inline`, `force_download` lo sirve como `attachment`, `embed` lo muestra en un iframe, y `new_window` y `popup` lo abren con `window.open`. El sitio no habilita el marco.

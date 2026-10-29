@@ -1,5 +1,5 @@
 import { CampusError } from "../errors.js";
-import { SETTINGS_KINDS, settingFields, type SettingDef } from "./settings-catalog.js";
+import { RESOURCE_DISPLAY, SETTINGS_KINDS, URL_DISPLAY, settingFields, type SettingDef } from "./settings-catalog.js";
 import { RESERVED_PARAMS } from "../moodle/functions.js";
 import { rootName } from "../moodle/serialize.js";
 import { isSyntheticSite } from "./policy.js";
@@ -1863,7 +1863,7 @@ export const WRITE_WEB_FORMS: readonly WebFormWriteSpec[] = [
             "introeditor[text]": optionalBody(20_000),
             "introeditor[format]": oneOf("1"),
             // Presentación del enlace (0 automática, 1 incrustada, 5 en otra página). Sólo si se pidió (content.ts).
-            display: oneOf("0", "1", "5"),
+            display: oneOf(...Object.values(URL_DISPLAY)),
             visible: oneOf("0", "1"),
             coursecontentnotification: oneOf("0"),
         },
@@ -1929,6 +1929,8 @@ export const WRITE_WEB_FORMS: readonly WebFormWriteSpec[] = [
             "introeditor[text]": optionalBody(20_000),
             "introeditor[format]": oneOf("1"),
             files: int,
+            // Presentación (ADR-131): 0 automática, 1 incrustada, 3 ventana nueva, 4 descarga, 5 abrir, 6 emergente. Sólo si se pidió (content.ts).
+            display: oneOf(...Object.values(RESOURCE_DISPLAY)),
             visible: oneOf("0", "1"),
             coursecontentnotification: oneOf("0"),
         },
@@ -1936,7 +1938,7 @@ export const WRITE_WEB_FORMS: readonly WebFormWriteSpec[] = [
         forced: { coursecontentnotification: "0" },
         omit_when_zero: ["coursecontentnotification"],
         upload_fields: ["files"],
-        effects: "Crea un recurso con UN archivo subido desde el borrador del usuario. Sin notificaciones.",
+        effects: "Crea un recurso con UN archivo subido desde el borrador del usuario, con la presentación indicada si se pidió. Sin notificaciones.",
     },
     {
         id: "course_group_add",
@@ -2359,11 +2361,11 @@ export const WRITE_WEB_READS: Readonly<Record<string, { path: string; query: Rec
         query: { update: int },
         effects: "Lectura del formulario de edición de una actividad (descripción, opciones, archivos actuales). Moodle copia los archivos de la actividad a un borrador privado nuevo.",
     },
-    // Alta de un enlace (URL): sólo para comprobar qué presentaciones ofrece el sitio antes de crearlo. Sección ya verificada.
-    modedit_url_add_form: {
+    // Alta de un enlace o un archivo: sólo para comprobar qué presentaciones ofrece el sitio antes de crearlo (ADR-131). Sección ya verificada.
+    modedit_add_form: {
         path: "/course/modedit.php",
-        query: { add: oneOf("url"), course: int, section: range(0, 200) },
-        effects: "Lectura del formulario de alta de un enlace (opciones de presentación). Moodle no crea la actividad; puede reservar un borrador de archivos vacío.",
+        query: { add: oneOf("url", "resource"), course: int, section: range(0, 200) },
+        effects: "Lectura del formulario de alta de un enlace o un archivo (opciones de presentación). Moodle no crea la actividad; puede reservar un borrador de archivos vacío.",
     },
     lesson_page_form: {
         path: "/mod/lesson/editpage.php",

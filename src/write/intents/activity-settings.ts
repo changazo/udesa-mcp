@@ -3,7 +3,7 @@ import { CampusError } from "../../errors.js";
 import { GroupingsSchema, GroupsSchema } from "../../moodle/schemas.js";
 import type { IntentContext, Interpretation, ItemVerification, Presence, WriteIntent } from "../intent.js";
 import type { Difference, Plan, PlanDraft, PlanItem } from "../plan.js";
-import { COMMON_SETTINGS, KIND_SETTINGS, SETTINGS_KINDS, type Control, type SettingDef } from "../settings-catalog.js";
+import { COMMON_SETTINGS, DISPLAY_NAMES, KIND_SETTINGS, SETTINGS_KINDS, type Control, type SettingDef } from "../settings-catalog.js";
 import { offeredOptions, readModForm } from "./modform.js";
 import { parseLocalDateTime } from "./w2.js";
 
@@ -194,11 +194,6 @@ async function build(input: Req, ctx: IntentContext, undoOf: string | null): Pro
             controls[d.field] = d.control;
             values[d.field] = toRaw(key, d, v);
             labels[d.field] = key;
-            if (m.kind === "url" && d.field === "display") {
-                // La presentación «embed» sólo vale si el sitio la ofrece en el formulario: si no, se rechaza antes de planear (sin POST).
-                const offered = offeredOptions(await ctx.web.readPage("modedit_form", { update: String(m.cmid) }), "display");
-                if (!offered.includes(values[d.field]!)) throw new CampusError("WRITE_NOT_ALLOWED", `«${key}» no lo ofrece el sitio para esta actividad. Opciones ofrecidas: ${offered.join(", ") || "ninguna"}.`);
-            }
         }
         if (input.restrictions !== undefined) {
             if (!fields.some(([n]) => n === RESTRICTIONS_FIELD)) throw new CampusError("WRITE_NOT_ALLOWED", "Esta actividad no admite restricciones de acceso.");
@@ -210,6 +205,16 @@ async function build(input: Req, ctx: IntentContext, undoOf: string | null): Pro
     const prior: Record<string, string> = Object.fromEntries(Object.keys(values).map((f) => [f, currentValue(fields, f, controls[f]!) ?? ""]));
     const changed = Object.keys(values).filter((f) => (controls[f] === "json" ? canonical(values[f]!) !== canonical(prior[f]!) : values[f] !== prior[f]));
     if (!changed.length) throw new CampusError("WRITE_NOT_ALLOWED", "Los ajustes pedidos ya son los actuales.");
+    // Presentación de enlaces y archivos (ADR-131): Moodle descarta en silencio un valor que el selector no ofrece, así que
+    // el valor (pedido o a restaurar) tiene que figurar en el formulario de este sitio. Si no, se rechaza antes de enviar.
+    const offeredOnly = changed.filter((f) => Object.values(catalog).some((d) => d.field === f && d.offered_only));
+    if (offeredOnly.length) {
+        const html = await ctx.web.readPage("modedit_form", { update: String(m.cmid) });
+        for (const f of offeredOnly) {
+            const offered = offeredOptions(html, f);
+            if (!offered.includes(values[f]!)) throw new CampusError("WRITE_NOT_ALLOWED", `«${labels[f]}» = ${values[f]}${f === "display" ? ` (${DISPLAY_NAMES[values[f]!] ?? "?"})` : ""} no lo ofrece el sitio para esta actividad${input.raw ? ": no se puede restaurar por el formulario" : ""}. Opciones ofrecidas: ${offered.join(", ") || "ninguna"}.`);
+        }
+    }
     if (m.kind === "assign" && changed.some((f) => ASSIGN_GRADE_FIELDS.includes(f)) && (await assignHasGrades(ctx, input.course_id, m.cmid))) throw new CampusError("WRITE_NOT_ALLOWED", "La tarea ya tiene notas puestas: el tipo de nota, la escala, el método de calificación y el flujo de trabajo no se cambian por esta vía.");
     const want = Object.fromEntries(changed.map((f) => [f, values[f]!]));
     const was = Object.fromEntries(changed.map((f) => [f, prior[f]!]));
@@ -221,7 +226,7 @@ async function build(input: Req, ctx: IntentContext, undoOf: string | null): Pro
         course_id: input.course_id,
         base_risk: "R2",
         summary: `${undoOf ? "Deshacer: " : ""}Ajustes de «${m.name}» (${m.kind}): ${changed.map((f) => labels[f]).join(", ")}.`,
-        payload_preview: { activity: { course_module_id: m.cmid, type: m.kind, name: m.name }, changes: changed.map((f) => ({ setting: labels[f], field: f, before: was[f], after: want[f] })) },
+        payload_preview: { activity: { course_module_id: m.cmid, type: m.kind, name: m.name }, changes: changed.map((f) => ({ setting: labels[f], field: f, before: was[f], after: want[f], ...(offeredOnly.includes(f) && f === "display" ? { before_name: DISPLAY_NAMES[was[f]!] ?? null, after_name: DISPLAY_NAMES[want[f]!] ?? null } : {}) })) },
         side_effects: [
             "Cambia cómo funciona la actividad para los participantes. El resto de la configuración se reenvía tal cual. Sin notificación de cambio.",
             ...(restr ? ["Las restricciones de acceso deciden quién puede entrar a la actividad (y si la ven cuando no cumplen)."] : []),
@@ -250,7 +255,7 @@ const value = z.union([z.string().max(64), z.number(), z.boolean()]);
 const shape = {
     course_id: z.number().int().positive(),
     course_module_id: z.number().int().positive().describe("cmid de la actividad."),
-    settings: z.record(z.string().max(64), value).optional().describe("Ajustes por clave del catálogo (ADR-082). Comunes: group_mode (none|separate|visible), grouping_id, show_description. Por tipo: choice (allow_update, allow_multiple, show_results…), forum (forum_type, subscription, max_attachments…), glossary, data, choicegroup, assign (online_text, file_submissions, max_files…), quiz (grade_method, navigation, shuffle_answers, behaviour, review_<qué>_<cuándo>…), lesson, h5pactivity, book, wiki, folder, url (display: automatic, embed u open), resource. Un error lista las claves admitidas."),
+    settings: z.record(z.string().max(64), value).optional().describe("Ajustes por clave del catálogo (ADR-082). Comunes: group_mode (none|separate|visible), grouping_id, show_description. Por tipo: choice (allow_update, allow_multiple, show_results…), forum (forum_type, subscription, max_attachments…), glossary, data, choicegroup, assign (online_text, file_submissions, max_files…), quiz (grade_method, navigation, shuffle_answers, behaviour, review_<qué>_<cuándo>…), lesson, h5pactivity, book, wiki, folder, url (display: automatic, embed u open), resource (display: automatic, embed, open, new_window, force_download o popup; show_size, show_type, show_date). display sólo acepta lo que ofrece el formulario del sitio. Un error lista las claves admitidas."),
     restrictions: z
         .object({
             from: z.string().max(40).nullable().optional().describe("Disponible desde (AAAA-MM-DDTHH:MM, zona del perfil)."),

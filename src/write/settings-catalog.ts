@@ -16,6 +16,8 @@ export interface SettingDef {
     values?: Record<string, string>;
     /** Valores del formulario que sólo se aceptan al deshacer (restaurar lo que había), nunca como pedido. */
     restore?: string[];
+    /** El select sólo acepta lo que el formulario ofrece en este sitio: se comprueba antes de enviar (también al deshacer). */
+    offered_only?: boolean;
     /** Rango para enteros (select numérico o texto). */
     min?: number;
     max?: number;
@@ -27,6 +29,16 @@ const box = (field: string, help: string): SettingDef => ({ field, control: "che
 const adv = (field: string, help: string): SettingDef => ({ field, control: "advcheckbox", help });
 const int = (field: string, min: number, max: number, help: string): SettingDef => ({ field, control: "int", min, max, help });
 const pick = (field: string, values: Record<string, string>, help: string): SettingDef => ({ field, control: "select", values, help });
+
+/**
+ * Presentación de enlaces y archivos: valor público → `RESOURCELIB_DISPLAY_*` (lib/resourcelib.php) que envía el
+ * formulario. Lo usan el ajuste (este catálogo) y el alta (create_content). Un enlace admite tres; un archivo,
+ * las seis que ofrece el sitio. El marco (2) no se ofrece: sólo se restaura al deshacer.
+ */
+export const URL_DISPLAY = { automatic: "0", embed: "1", open: "5" } as const;
+export const RESOURCE_DISPLAY = { automatic: "0", embed: "1", new_window: "3", force_download: "4", open: "5", popup: "6" } as const;
+/** Nombre de cada valor crudo, para mostrar antes y después (incluye el marco). */
+export const DISPLAY_NAMES: Record<string, string> = { "0": "automatic", "1": "embed", "2": "frame", "3": "new_window", "4": "force_download", "5": "open", "6": "popup" };
 
 /** Comunes (sólo se ofrecen si el formulario del tipo los trae). */
 export const COMMON_SETTINGS: Record<string, SettingDef> = {
@@ -171,12 +183,13 @@ export const KIND_SETTINGS: Record<string, Record<string, SettingDef>> = {
         download_button: adv("showdownloadfolder", "Botón de descargar la carpeta."),
         force_download: adv("forcedownload", "Forzar la descarga de los archivos."),
     },
-    // Presentación del enlace (RESOURCELIB_DISPLAY_AUTO 0, _EMBED 1, _OPEN 5). Frame, new y popup quedan afuera.
     url: {
         // Deshacer puede restaurar las otras presentaciones de Moodle (2 marco, 3 ventana nueva, 4 descarga, 6 emergente).
-        display: { ...pick("display", { automatic: "0", embed: "1", open: "5" }, "Presentación del enlace: automatic (Moodle decide), embed (dentro del Campus) u open (en otra página)."), restore: ["2", "3", "4", "6"] },
+        display: { ...pick("display", URL_DISPLAY, "Presentación del enlace: automatic (Moodle decide), embed (dentro del Campus) u open (en otra página)."), restore: ["2", "3", "4", "6"], offered_only: true },
     },
     resource: {
+        // ADR-131: las seis que ofrece el sitio; el marco (2) sólo se restaura al deshacer.
+        display: { ...pick("display", RESOURCE_DISPLAY, "Presentación del archivo: automatic (Moodle decide), embed (dentro del Campus), open (el navegador lo abre directo), new_window (ventana nueva completa), force_download (descarga) o popup (ventana emergente)."), restore: ["2"], offered_only: true },
         show_size: box("showsize", "Mostrar el tamaño."),
         show_type: box("showtype", "Mostrar el tipo."),
         show_date: box("showdate", "Mostrar la fecha."),

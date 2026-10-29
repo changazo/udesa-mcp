@@ -20,7 +20,7 @@ Para cada tipo de elemento, qué hace el MCP de escritura (perfil `docente-compl
 | Foro | `forum` | Sí (`campus_plan_create_content`, ADR-070) | Descripción; ajustes (tipo, suscripción opcional o deshabilitada, adjuntos, bloqueo) | Avisos, respuestas, adjuntos, fijar y bloquear; moderación: borrar posts de cualquier autor y mover discusiones (ADR-094). **En el Avisos del sandbox no se publica en las pruebas:** su suscripción es forzada y notificaría a los participantes. En los cursos reales sí se puede, como R3 (ADR-130) |
 | Asistencia | `attendance` | Sí (`campus_plan_create_attendance`) | Descripción; modo de grupos | Agregar, editar (fecha, horario, descripción; ADR-089) y borrar sesiones (ADR-084) y tomar asistencia |
 | Asistencia por materia | `subjectattendance` | No (plugin propio de UdeSA) | Descripción | No |
-| Archivo | `resource` | Sí (archivo local) | Descripción; reemplazar el archivo (`campus_plan_activity_files`, R3) | No aplica |
+| Archivo | `resource` | Sí (archivo local), con presentación (`display`) si el sitio la ofrece (ADR-131) | Descripción; reemplazar el archivo (`campus_plan_activity_files`, R3); presentación (`campus_plan_activity_settings`, `display`: las seis del sitio) | No aplica |
 | Carpeta | `folder` | Sí, con archivos locales | Descripción; agregar o quitar archivos (`campus_plan_activity_files`) | No aplica |
 | Página | `page` | Sí | Descripción y contenido | No aplica |
 | Panopto (herramienta externa) | `lti` | No (requiere la herramienta externa configurada) | Descripción | No: el contenido vive en Panopto |

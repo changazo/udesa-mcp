@@ -8,6 +8,7 @@ import type { FormSubmission } from "../web.js";
 import { ChatFile } from "../chat-files.js";
 import { describeLocalFiles, type PlanFile } from "../files.js";
 import { h5pPackageOf } from "./h5p-package.js";
+import { RESOURCE_DISPLAY, URL_DISPLAY } from "../settings-catalog.js";
 import { fieldOf, offeredOptions, readModForm } from "./modform.js";
 
 /**
@@ -133,12 +134,6 @@ async function verify(item: PlanItem, plan: Plan, ctx: IntentContext, known: Rec
         const u = (await t.call("mod_url_get_urls_by_courses", { courseids: [plan.course_id] }, UrlsSchema)).urls.find((y) => y.coursemodule === m.id);
         check("externalurl", x.url, u?.externalurl ?? null);
         checked.push("externalurl");
-        if (x.display !== undefined) {
-            // La presentación no la expone el servicio de URLs: se relee del formulario de edición de la actividad recién creada.
-            const shown = (await readModForm(ctx, m.id, "url")).filter(([n]) => n === "display").map(([, v]) => v).pop() ?? null;
-            check("display", x.display, shown);
-            checked.push("display");
-        }
     } else if (kind === "label") {
         check("text", x.text, comparable(m.description));
         checked.push("text");
@@ -177,6 +172,12 @@ async function verify(item: PlanItem, plan: Plan, ctx: IntentContext, known: Rec
         check("groups", x.group_ids, groups);
         checked.push("groups");
     }
+    if (x.display !== undefined) {
+        // La presentación no la exponen los servicios de URLs ni de recursos: se relee del formulario de edición de la actividad creada.
+        const shown = (await readModForm(ctx, m.id, kind)).filter(([n]) => n === "display").map(([, v]) => v).pop() ?? null;
+        check("display", x.display, shown);
+        checked.push("display");
+    }
     return { outcome: differences.length ? "difiere" : "coincide", checked, differences, moodle_ids: { cmid: m.id } };
 }
 
@@ -199,7 +200,12 @@ const shape = {
     intro: z.string().max(10_000).optional().describe("Descripción (Markdown); no aplica a etiquetas ni subsecciones."),
     content: z.string().min(1).max(200_000).optional().describe("page: contenido de la página (Markdown)."),
     external_url: z.string().min(1).max(1900).optional().describe("Para type=url: dirección http(s) del enlace."),
-    display: z.enum(["automatic", "embed", "open"]).optional().describe("Para type=url: presentación del enlace (automatic, embed = dentro del Campus, open = en otra página). Sólo si el sitio la ofrece; sin este campo queda la de Moodle."),
+    display: z
+        .enum(["automatic", "embed", "open", "new_window", "force_download", "popup"])
+        .optional()
+        .describe(
+            "Presentación. type=url: automatic, embed (dentro del Campus) u open (en otra página). type=resource: automatic, embed (dentro del Campus), open (el navegador abre el archivo directo), new_window (ventana nueva completa), force_download (descarga) o popup (ventana emergente). Sólo si el formulario del sitio la ofrece; sin este campo queda la de Moodle.",
+        ),
     text: z.string().min(1).max(50_000).optional().describe("label: texto de la etiqueta (Markdown)."),
     file_path: z.string().min(1).max(1000).optional().describe("resource: archivo; h5pactivity: paquete .h5p. Ruta ABSOLUTA del archivo local que indicó el humano (sólo servidor local)."),
     file_paths: z.array(z.string().min(1).max(1000)).min(1).max(MAX_FOLDER_FILES).optional().describe("folder: rutas ABSOLUTAS de los archivos locales (hasta 10; sólo servidor local)."),
@@ -223,7 +229,7 @@ const OWN: Record<Kind, readonly (keyof typeof shape)[]> = {
     page: ["content"],
     url: ["external_url", "display"],
     label: ["text"],
-    resource: ["file_path", "files"],
+    resource: ["file_path", "files", "display"],
     forum: ["subscription", "whole_forum_grade"],
     folder: ["file_paths", "files"],
     book: [],
@@ -239,14 +245,27 @@ const OWN: Record<Kind, readonly (keyof typeof shape)[]> = {
 };
 const REQUIRED: Partial<Record<Kind, keyof typeof shape>> = { page: "content", url: "external_url", label: "text", resource: "file_path", folder: "file_paths", wiki: "first_page_title", choice: "options", choicegroup: "group_ids", h5pactivity: "file_path" };
 const SPECIFIC = ["content", "external_url", "display", "text", "file_path", "file_paths", "files", "options", "first_page_title", "wiki_mode", "group_ids", "subscription", "whole_forum_grade"] as const;
-/** Presentación de un enlace: valor público → valor de `RESOURCELIB_DISPLAY_*` que envía el formulario de Moodle. */
-const URL_DISPLAY = { automatic: "0", embed: "1", open: "5" } as const;
+/** Presentación por tipo (valor público → `RESOURCELIB_DISPLAY_*`; ADR-131). */
+const DISPLAY: Partial<Record<Kind, Record<string, string>>> = { url: URL_DISPLAY, resource: RESOURCE_DISPLAY };
+
+/**
+ * Antes del POST (fail-closed): la presentación pedida tiene que figurar en el formulario de alta de ese tipo en
+ * esta sección. Devuelve el valor crudo que se envía y se verifica.
+ */
+async function displayFor(ctx: IntentContext, kind: Kind, display: string, courseId: number, section: number): Promise<string> {
+    const map = DISPLAY[kind]!;
+    const want = map[display];
+    if (want === undefined) throw new CampusError("WRITE_NOT_ALLOWED", `Para type=${kind}, display admite: ${Object.keys(map).join(", ")}.`);
+    const offered = offeredOptions(await ctx.web.readPage("modedit_add_form", { add: kind, course: String(courseId), section: String(section) }), "display");
+    if (!offered.includes(want)) throw new CampusError("WRITE_NOT_ALLOWED", `La presentación «${display}» no la ofrece el sitio para ${LABELS[kind]}. Opciones ofrecidas: ${offered.join(", ") || "ninguna"}.`);
+    return want;
+}
 
 export const createContentIntent: WriteIntent<typeof shape> = {
     name: "create_content",
     title: "Plan: crear contenido o una actividad (página, enlace, etiqueta, archivo, carpeta, libro, wiki, glosario, consulta…)",
     description:
-        "Arma el plan para crear en una sección existente: página (content), enlace (external_url), etiqueta (text), archivo (file_path local o files), foro, carpeta (file_paths locales o files), libro, wiki (first_page_title), glosario, consulta (options), base de datos, lección, encuesta, elección de grupo (group_ids), actividad H5P (file_path .h5p local o files) o subsección. Libros, glosarios, wikis, bases de datos, lecciones y encuestas se crean vacíos. Por defecto oculto y sin notificar. No escribe.",
+        "Arma el plan para crear en una sección existente: página (content), enlace (external_url y display opcional), etiqueta (text), archivo (file_path local o files, y display opcional: automatic, embed, open, new_window, force_download o popup), foro, carpeta (file_paths locales o files), libro, wiki (first_page_title), glosario, consulta (options), base de datos, lección, encuesta, elección de grupo (group_ids), actividad H5P (file_path .h5p local o files) o subsección. Libros, glosarios, wikis, bases de datos, lecciones y encuestas se crean vacíos. Por defecto oculto y sin notificar. No escribe.",
     inputShape: shape,
     fileParams: ["files"],
     capability: "create_content",
@@ -302,15 +321,6 @@ export const createContentIntent: WriteIntent<typeof shape> = {
             fields.externalurl = u.href;
             expected.url = u.href;
             preview.url = u.href;
-            if (input.display !== undefined) {
-                // Antes del POST: la opción tiene que figurar en el formulario de alta de esta sección (fail-closed).
-                const want = URL_DISPLAY[input.display];
-                const offered = offeredOptions(await ctx.web.readPage("modedit_url_add_form", { add: "url", course: String(input.course_id), section: String(input.section) }), "display");
-                if (!offered.includes(want)) throw new CampusError("WRITE_NOT_ALLOWED", `La presentación «${input.display}» no la ofrece el sitio para un enlace. Opciones ofrecidas: ${offered.join(", ") || "ninguna"}.`);
-                fields.display = want;
-                expected.display = want;
-                preview.display = input.display;
-            }
         } else if (kind === "label") {
             const html = toHtml(input.text!, "markdown");
             const text = comparable(html);
@@ -373,6 +383,12 @@ export const createContentIntent: WriteIntent<typeof shape> = {
             fields.serializedselectedgroups = ids.map((id) => `;${id}`).join("");
             expected.group_ids = ids;
             preview.groups = ids.map((id) => ({ id, name: groups.find((g) => g.id === id)?.name ?? null }));
+        }
+        if (input.display !== undefined) {
+            const want = await displayFor(ctx, kind, input.display, input.course_id, input.section);
+            fields.display = want;
+            expected.display = want;
+            preview.display = input.display;
         }
         if (["book", "data", "lesson"].includes(kind)) warnings.push(`${LABELS[kind][0]!.toUpperCase()}${LABELS[kind].slice(1)} se crea vacío: su contenido se agrega aparte.`);
         fields.name = name;
