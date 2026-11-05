@@ -2,7 +2,7 @@ import { mayNotify } from "../policy.js";
 import { z } from "zod";
 import { CampusError } from "../../errors.js";
 import { decodeEntities } from "../../domain/html.js";
-import { AssignmentsSchema, AssignParticipantsSchema, SubmissionStatusSchema } from "../../moodle/schemas.js";
+import { AssignmentsSchema, AssignParticipantsSchema, EnrolledUsersSchema, GradeItemsSchema, GroupsSchema, SubmissionStatusSchema } from "../../moodle/schemas.js";
 import { describeLocalFiles, type PlanFile } from "../files.js";
 
 /** Tope por archivo de retroalimentación (como los archivos de actividades). */
@@ -12,14 +12,15 @@ import type { Difference, Plan, PlanDraft, PlanItem } from "../plan.js";
 import { comparable, toHtml } from "../text.js";
 import { parseFormFields } from "../web.js";
 import { fieldOf, stableHtml } from "./modform.js";
+import { membersOf as groupingMembers } from "./groupings.js";
 
 /**
  * W6 · Calificación avanzada de una entrega (ADR-095), por el formulario CLÁSICO de calificación
  * (`/mod/assign/view.php?action=grade&userid`, marcador `_qf__mod_assign_grade_form_<userid>`):
  * puntos, ESCALA (el ítem de la escala), RÚBRICA (un nivel por criterio, con observación), GUÍA DE
  * EVALUACIÓN (puntaje por criterio, con observación), comentario y ARCHIVOS de retroalimentación (en el
- * borrador que sirve el formulario, con los actuales). La notificación al estudiante queda SIEMPRE en 0 y
- * `applytoall` en 0. El estado del flujo de trabajo se conserva (o se cambia, pero nunca a «liberada»).
+ * borrador que sirve el formulario, con los actuales). En grupos nunca se notifica; individualmente
+ * sólo si la política lo permite. `applytoall` queda en 0. El flujo nunca se fija como «liberada».
  * Verificación: nota (mod_assign_get_grades), formulario releído (niveles, puntajes, observaciones) y
  * archivos (mod_assign_get_submission_status). Deshacer: volver a lo anterior y quitar los archivos
  * agregados; un archivo quitado no vuelve.
@@ -124,11 +125,62 @@ function snapshot(g: GradeForm, files: string[]) {
 }
 type Snap = ReturnType<typeof snapshot>;
 
+/** Resolver la membresía en el agrupamiento de entrega, nunca en todos los grupos del curso por accidente. */
+async function resolveTeam(ctx: IntentContext, courseId: number, assignmentId: number, groupId: number, representative: number) {
+    const a = (await ctx.read.session.transport.call("mod_assign_get_assignments", { courseids: [courseId] }, AssignmentsSchema)).courses.find((c) => c.id === courseId)?.assignments.find((x) => x.id === assignmentId);
+    if (!a || !a.teamsubmission || a.teamsubmissiongroupingid == null) throw new CampusError("WRITE_NOT_ALLOWED", "No se pudo determinar el agrupamiento de la entrega grupal.");
+    const groups = (await ctx.read.session.transport.call("core_group_get_course_groups", { courseid: courseId }, GroupsSchema)).filter((g) => g.courseid === courseId);
+    const group = groups.find((g) => g.id === groupId);
+    if (!group) throw new CampusError("RESOURCE_OUT_OF_SCOPE", `El grupo ${groupId} no es del curso.`);
+    const grouping = a.teamsubmissiongroupingid;
+    const eligible = grouping ? await groupingMembers(ctx, grouping) : groups.map((g) => g.id);
+    if (!eligible.includes(groupId)) throw new CampusError("WRITE_NOT_ALLOWED", "El grupo indicado no pertenece al agrupamiento de entrega.");
+    const users = await ctx.read.session.transport.call("core_enrol_get_enrolled_users", { courseid: courseId }, EnrolledUsersSchema);
+    const participants = await ctx.read.session.transport.call("mod_assign_list_participants", { assignid: assignmentId, groupid: 0, filter: "", skip: 0, limit: 0, onlyids: false, includeenrolments: false, tablesort: false }, AssignParticipantsSchema);
+    const people = users.filter((u) => (u.groups ?? []).some((g) => g.id === groupId));
+    if (!people.some((u) => u.id === representative)) throw new CampusError("WRITE_NOT_ALLOWED", "El participante no pertenece al grupo indicado.");
+    if (people.length > 30) throw new CampusError("WRITE_NOT_ALLOWED", "El grupo supera el máximo de 30 participantes por plan.");
+    for (const u of people) {
+        const eligibleMemberships = (u.groups ?? []).filter((g) => eligible.includes(g.id));
+        const p = participants.find((x) => x.id === u.id);
+        if (eligibleMemberships.length !== 1 || !p || !(p.groups ?? []).some((g) => g.id === groupId)) throw new CampusError("WRITE_NOT_ALLOWED", `No se pudo confirmar un grupo de entrega único y la participación de ${u.id}.`);
+    }
+    const participantMembers = participants.filter((p) => (p.groups ?? []).some((g) => g.id === groupId)).map((p) => p.id).sort((a, b) => a - b);
+    const memberIds = people.map((u) => u.id).sort((a, b) => a - b);
+    if (new Set(memberIds).size !== memberIds.length || new Set(participantMembers).size !== participantMembers.length) throw new CampusError("UNEXPECTED_RESPONSE", "La lista del grupo contiene participantes duplicados.");
+    if (JSON.stringify(participantMembers) !== JSON.stringify(memberIds)) throw new CampusError("WRITE_NOT_ALLOWED", "Las fuentes no coinciden sobre los integrantes del grupo.");
+    if (!participants.some((p) => memberIds.includes(p.id) && !!p.submissionstatus)) throw new CampusError("WRITE_NOT_ALLOWED", "El grupo no tiene registro de entrega; no se abre el formulario ni se crea uno vacío.");
+    return { assignment_id: assignmentId, grouping_id: grouping, group_id: groupId, group_name: group.name ?? String(groupId), members: people.map((u) => ({ id: u.id, name: u.fullname ?? String(u.id) })).sort((a, b) => a.id - b.id) };
+}
+
+async function gradebookState(ctx: IntentContext, courseId: number, assignmentId: number, userId: number) {
+    const report = await ctx.read.session.transport.call("gradereport_user_get_grade_items", { courseid: courseId, userid: userId }, GradeItemsSchema);
+    const item = report.usergrades.find((u) => u.userid === userId)?.gradeitems.find((i) => i.itemmodule === "assign" && i.iteminstance === assignmentId);
+    if (!item) throw new CampusError("UNEXPECTED_RESPONSE", `No se pudo leer la nota de ${userId} en el libro.`);
+    return { locked: !!(item.gradeislocked || item.locked), overridden: !!item.gradeisoverridden, value: item.graderaw ?? null };
+}
+
+async function teamSubmissionState(ctx: IntentContext, assignmentId: number, userId: number, groupId: number) {
+    const state = await ctx.read.session.transport.call("mod_assign_get_submission_status", { assignid: assignmentId, userid: userId }, SubmissionStatusSchema);
+    const last = state.lastattempt;
+    const groups = [last?.submissiongroup, last?.teamsubmission?.groupid].filter((id): id is number => typeof id === "number" && id > 0);
+    if (groups.some((id) => id !== groupId)) throw new CampusError("WRITE_NOT_ALLOWED", `La entrega de ${userId} corresponde a otro grupo.`);
+    const sub = last?.teamsubmission ?? last?.submission;
+    return { groups, id: sub?.id ?? null, attempt: sub?.attemptnumber ?? null, modified: sub?.timemodified ?? null, status: sub?.status ?? null };
+}
+
 async function readVersions(plan: Plan, ctx: IntentContext): Promise<Record<string, string | number | null>> {
     const out: Record<string, string | null> = {};
     for (const k of Object.keys(plan.preconditions.versions)) {
         const [kind, cmid, assignId, userId] = k.split(":");
-        out[k] = kind === "gradeform" ? JSON.stringify(snapshot(await readForm(ctx, Number(cmid), Number(userId)), await feedbackFiles(ctx, Number(assignId), Number(userId)))) : null;
+        if (kind === "gradeform") out[k] = JSON.stringify(snapshot(await readForm(ctx, Number(cmid), Number(userId)), await feedbackFiles(ctx, Number(assignId), Number(userId))));
+        else if (kind === "gradegroup") out[k] = JSON.stringify(await resolveTeam(ctx, plan.course_id, Number(cmid), Number(assignId), Number(userId)));
+        else if (kind === "gradebook") out[k] = JSON.stringify(await gradebookState(ctx, plan.course_id, Number(cmid), Number(assignId)));
+        else if (kind === "teamsubmission") {
+            const groupId = Number(k.split(":")[4]);
+            out[k] = JSON.stringify(await teamSubmissionState(ctx, Number(cmid), Number(assignId), groupId));
+        }
+        else out[k] = null;
     }
     return out;
 }
@@ -144,6 +196,11 @@ async function verify(item: PlanItem, _plan: Plan, ctx: IntentContext): Promise<
     const keys = Object.keys(x.want) as (keyof Snap)[];
     const differences: Difference[] = keys.filter((k) => JSON.stringify(now[k]) !== JSON.stringify(x.want[k])).map((k) => ({ field: k, expected: x.want[k], observed: now[k] }));
     const grade = await gradeValue(ctx, Number(t.assignment_id), Number(t.user_id));
+    if (t.group_id && x.want.grade != null && Number(x.want.grade) !== grade) differences.push({ field: "nota (libro)", expected: Number(x.want.grade), observed: grade });
+    if (t.group_id && x.want.grade != null) {
+        const book = await gradebookState(ctx, Number(t.course_id), Number(t.assignment_id), Number(t.user_id));
+        if (book.locked || book.overridden || Number(x.want.grade) !== book.value) differences.push({ field: "libro de calificaciones", expected: Number(x.want.grade), observed: book });
+    }
     if (!differences.length) return { outcome: "coincide", checked: [...keys, "nota"], differences };
     return { outcome: keys.every((k) => JSON.stringify(now[k]) === JSON.stringify(x.prior[k])) ? "sin_efecto" : "difiere", checked: keys, differences: [...differences, { field: "nota (libro)", expected: null, observed: grade }] };
 }
@@ -159,6 +216,8 @@ interface Req {
     course_id: number;
     assignment_id: number;
     participant_id: number;
+    apply_to_group?: boolean;
+    group_id?: number;
     grade?: number | string;
     rubric?: { criterion: string | number; level: string | number; remark?: string }[];
     guide?: { criterion: string | number; score: number; remark?: string }[];
@@ -174,12 +233,12 @@ interface Req {
 
 const match = (want: string | number, id: number, label: string) => (typeof want === "number" ? want === id : comparable(label).toLowerCase() === comparable(want).toLowerCase());
 
-async function build(input: Req, ctx: IntentContext, undoOf: string | null): Promise<PlanDraft> {
+async function build(input: Req, ctx: IntentContext, undoOf: string | null, allowTeam = false): Promise<PlanDraft> {
     const a = (await ctx.read.session.transport.call("mod_assign_get_assignments", { courseids: [input.course_id] }, AssignmentsSchema)).courses.find((c) => c.id === input.course_id)?.assignments.find((x) => x.id === input.assignment_id);
     if (!a) throw new CampusError("RESOURCE_OUT_OF_SCOPE", `La tarea ${input.assignment_id} no es del curso ${input.course_id}.`);
     if (!a.cmid) throw new CampusError("UNEXPECTED_RESPONSE", "La tarea no trae su course_module_id.");
     if (a.blindmarking && !a.revealidentities) throw new CampusError("WRITE_NOT_ALLOWED", "Corrección anónima: no se califica por esta vía (y nunca se revelan identidades).");
-    if (a.teamsubmission) throw new CampusError("WRITE_NOT_ALLOWED", "Entrega grupal: no se califica por esta vía (se aplicaría a todo el grupo).");
+    if (a.teamsubmission && !allowTeam) throw new CampusError("WRITE_NOT_ALLOWED", "Entrega grupal: indicá apply_to_group y el group_id de la entrega.");
     const participants = await ctx.read.session.transport.call("mod_assign_list_participants", { assignid: a.id, groupid: 0, filter: "", skip: 0, limit: 0, onlyids: false, includeenrolments: false, tablesort: false }, AssignParticipantsSchema);
     const person = participants.find((p) => p.id === input.participant_id);
     if (!person) throw new CampusError("RESOURCE_OUT_OF_SCOPE", `El participante ${input.participant_id} no es participante de la tarea.`);
@@ -273,7 +332,7 @@ async function build(input: Req, ctx: IntentContext, undoOf: string | null): Pro
         want.files = [...files.filter((n) => !remove.includes(n)), ...planFiles.map((f) => f.filename)].sort();
     }
     const changed = (Object.keys(want) as (keyof Snap)[]).filter((k) => JSON.stringify(want[k]) !== JSON.stringify(prior[k]));
-    if (!changed.length) throw new CampusError("WRITE_NOT_ALLOWED", "La calificación ya está así.");
+    if (!changed.length && !allowTeam) throw new CampusError("WRITE_NOT_ALLOWED", "La calificación ya está así.");
     const ungraded = (await gradeValue(ctx, a.id, input.participant_id)) === null;
     return {
         intent: "grade_advanced",
@@ -303,10 +362,48 @@ async function build(input: Req, ctx: IntentContext, undoOf: string | null): Pro
     };
 }
 
+/** Un plan explícito para el grupo, con una escritura individual por integrante (applytoall=0). */
+async function buildTeam(input: Req, ctx: IntentContext): Promise<PlanDraft> {
+    if (!input.group_id) throw new CampusError("WRITE_NOT_ALLOWED", "Para calificar al grupo indicá su group_id explícito.");
+    if (input.rubric || input.guide || input.workflow_state || input.add_feedback_file_paths?.length || input.remove_feedback_files?.length || input.restore || input.notify_student) throw new CampusError("WRITE_NOT_ALLOWED", "La calificación grupal admite sólo puntos o escala y comentario, sin archivos, rúbrica, guía, flujo ni notificaciones.");
+    if (input.grade === undefined && input.feedback_comment === undefined) throw new CampusError("WRITE_NOT_ALLOWED", "Indicá una calificación o comentario.");
+    const team = await resolveTeam(ctx, input.course_id, input.assignment_id, input.group_id, input.participant_id);
+    const drafts: PlanDraft[] = [];
+    const pending: PlanDraft[] = [];
+    const versions: Record<string, string | number | null> = { [`gradegroup:${input.assignment_id}:${input.group_id}:${input.participant_id}`]: JSON.stringify(team) };
+    for (const member of team.members) {
+        const book = await gradebookState(ctx, input.course_id, input.assignment_id, member.id);
+        if (book.locked || book.overridden) throw new CampusError("WRITE_NOT_ALLOWED", `La nota de ${member.id} está bloqueada o sobrescrita en el libro.`);
+        versions[`gradebook:${input.assignment_id}:${member.id}`] = JSON.stringify(book);
+        versions[`teamsubmission:${input.assignment_id}:${member.id}:group:${team.group_id}`] = JSON.stringify(await teamSubmissionState(ctx, input.assignment_id, member.id, team.group_id));
+        const draft = await build({ course_id: input.course_id, assignment_id: input.assignment_id, participant_id: member.id, grade: input.grade, feedback_comment: input.feedback_comment, notify_student: false }, ctx, null, true);
+        Object.assign(versions, draft.preconditions.versions);
+        drafts.push(draft);
+        if (JSON.stringify(draft.payload_preview.before) !== JSON.stringify(draft.payload_preview.after)) pending.push(draft);
+        else if (input.grade !== undefined && Number((draft.payload_preview.after as Snap).grade) !== book.value) throw new CampusError("WRITE_NOT_ALLOWED", `El formulario y el libro no coinciden para ${member.id}.`);
+    }
+    if (!pending.length) throw new CampusError("WRITE_NOT_ALLOWED", "Todas las calificaciones y devoluciones del grupo ya están así.");
+    return {
+        intent: "grade_advanced", capability: "grade_submission", course_id: input.course_id, base_risk: "R3",
+        summary: `Calificar al grupo «${team.group_name}»: ${team.members.map((m) => m.name).join(", ")}. ${pending.length} de ${team.members.length} integrante(s) requieren cambios. Sin notificar.`,
+        payload_preview: { group: team, grades: drafts.map((d) => ({ ...d.payload_preview, changes_needed: JSON.stringify(d.payload_preview.before) !== JSON.stringify(d.payload_preview.after) })) },
+        side_effects: ["Se califica a cada integrante pendiente por separado con applytoall=0; no se usa el grupo por defecto.", "Los integrantes que ya tienen el estado pedido no se vuelven a escribir.", "Sin notificaciones. Las escrituras no son atómicas: si una falla, puede quedar una aplicación parcial."],
+        preconditions: { description: "El grupo, sus integrantes, las notas del libro y los formularios no cambiaron desde el plan.", versions },
+        undo: { kind: "ninguno", how: "La calificación grupal no tiene deshacer automático; revisar cada integrante.", until: null },
+        warnings: ["La primera calificación no siempre puede volver a «sin nota» por el formulario.", ...new Set(drafts.flatMap((d) => d.warnings))],
+        items: pending.flatMap((d, i) => d.items.map((item) => ({ ...item, item_id: `i${i + 1}`, target: { ...item.target, group_id: team.group_id } }))),
+        prior_state: { group: true },
+        untrusted_fields: ["payload_preview.group.group_name", "payload_preview.group.members", "payload_preview.grades"],
+        teacher_text: input.feedback_comment === undefined ? {} : { feedback: input.feedback_comment }, undo_of: null,
+    };
+}
+
 const shape = {
     course_id: z.number().int().positive(),
     assignment_id: z.number().int().positive().describe("assignment_id (no el course_module_id)."),
     participant_id: z.number().int().positive(),
+    apply_to_group: z.boolean().optional().describe("En entrega grupal, true califica a todos los integrantes de group_id, uno por uno y sin notificar."),
+    group_id: z.number().int().positive().optional().describe("Grupo de entrega explícito, obligatorio si apply_to_group=true."),
     grade: z.union([z.number(), z.string().max(255)]).optional().describe("Puntos, o el ítem de la ESCALA (su texto o su valor). Con rúbrica o guía no va: la nota sale de los criterios."),
     rubric: z.array(z.strictObject({ criterion: z.union([z.string().max(2_000), z.number().int()]).describe("Texto del criterio o su id."), level: z.union([z.string().max(2_000), z.number()]).describe("Texto del nivel, su puntaje o su id."), remark: z.string().max(5_000).optional() })).max(30).optional().describe("Rúbrica: un nivel por criterio (los que no se indican quedan como están)."),
     guide: z.array(z.strictObject({ criterion: z.union([z.string().max(255), z.number().int()]).describe("Nombre corto del criterio o su id."), score: z.number().min(0).max(1_000), remark: z.string().max(5_000).optional() })).max(30).optional().describe("Guía de evaluación: puntaje por criterio."),
@@ -320,7 +417,7 @@ const shape = {
 export const gradeAdvancedIntent: WriteIntent<typeof shape> = {
     name: "grade_advanced",
     title: "Plan: calificar con escala, rúbrica o guía, y archivos de retroalimentación",
-    description: "Arma el plan para calificar a UN participante por el formulario completo de la tarea: puntos o escala, rúbrica (nivel por criterio) o guía (puntaje por criterio), comentario, archivos de retroalimentación y estado del flujo de trabajo. Nunca notifica al estudiante. La vista previa muestra la escala, la rúbrica o la guía. No escribe.",
+    description: "Arma el plan para calificar a un participante por puntos, escala, rúbrica o guía, con comentario, archivos y flujo de trabajo. En una entrega grupal, apply_to_group=true y group_id califican a cada integrante con puntos o escala y comentario, sin archivos ni notificaciones. La vista previa muestra afectados y valores. No escribe.",
     inputShape: shape,
     capability: "grade_submission",
     synthetic_only: false,
@@ -328,8 +425,13 @@ export const gradeAdvancedIntent: WriteIntent<typeof shape> = {
     interpret,
     verify,
     reconcile,
-    plan: (input, ctx) => build(input, ctx, null),
+    plan: (input, ctx) => {
+        if (input.apply_to_group) return buildTeam(input, ctx);
+        if (input.group_id !== undefined) throw new CampusError("WRITE_NOT_ALLOWED", "group_id requiere apply_to_group=true.");
+        return build(input, ctx, null);
+    },
     async undo(plan, result, ctx) {
+        if (plan.prior_state.group === true) return { kind: "ninguno", reason: "La calificación grupal no tiene deshacer automático; revisar cada integrante." };
         if (!result.items.some((r) => r.outcome === "verificado" || r.outcome === "con_diferencias")) return { kind: "ninguno", reason: "La acción no aplicó cambios." };
         const p = plan.prior_state as { grade: string | null; rubric: { id: number; level: number | null; remark: string }[]; guide: { id: number; score: number | null; remark: string }[]; comment_html: string; workflow: string | null; added_files: string[]; ungraded: boolean };
         if (p.ungraded) return { kind: "ninguno", reason: "No había nota antes: Moodle no permite volver a «sin nota» por el formulario." };

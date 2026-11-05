@@ -141,6 +141,7 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [129](#adr-129--archivos-que-entrega-chatgpt-en-el-remoto) | Archivos que entrega ChatGPT en el remoto | adoptada |
 | [130](#adr-130--notificaciones-a-participantes-habilitadas) | Notificaciones a participantes habilitadas | adoptada |
 | [131](#adr-131--presentación-de-archivos-display) | Presentación de archivos (`display`) | adoptada |
+| [132](#adr-132--calificación-de-entregas-grupales) | Calificación de entregas grupales | implementada; validación real pendiente |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -1732,7 +1733,7 @@ El borrado de posts por deshacer de los propios sigue igual. Los helpers de foro
   - comentario y archivos de retroalimentación, en el borrador `files_<userid>_filemanager`, que ya trae los actuales;
   - estado del flujo de trabajo.
 
-  `sendstudentnotifications` y `applytoall` quedan fijos en 0. Nunca se fija «liberada», ni se reenvía una calificación ya liberada. Las anónimas y en grupo se siguen rechazando. La verificación relee el formulario (niveles, puntajes, observaciones), el comentario y los archivos, y reporta la nota del libro.
+  `sendstudentnotifications` y `applytoall` quedan fijos en 0. Nunca se fija «liberada», ni se reenvía una calificación ya liberada. Las anónimas se siguen rechazando; el alcance grupal se amplía en ADR-132. La verificación relee el formulario (niveles, puntajes, observaciones), el comentario y los archivos, y reporta la nota del libro.
 - **`campus_plan_grading_definition`:** el área sale de `/grade/grading/manage.php` (areaid, método activo, `deleteform`). La definición se guarda con el editor (`form/<rubric|guide>/edit.php`) SIN mezclar lo servido: sólo criterios nuevos (NEWIDn), así Moodle borra los que no llegan, y queda «lista para usar». Se borra con `manage.php?deleteform&confirmed=1`. Sólo sin notas puestas.
 - **Ajustes de tarea nuevos** (catálogo): `grading_method`, `grade_type`, `grade_scale` (validada contra las escalas del formulario; el error las lista) y `marking_workflow`. Sólo sin notas puestas; Moodle además deshabilita el tipo de nota.
 - **Transporte web:**
@@ -2262,3 +2263,14 @@ Falta la prueba con una cuenta de estudiante, que necesita su inicio de sesión.
 **Tests:** `write-resource-display.test.ts` (9): valores del catálogo, las seis presentaciones con los demás campos intactos, de `force_download` a `open` con su deshacer, el marco restaurable sólo si el formulario lo ofrece, rechazos sin enviar, el alta con y sin `display`, y valores de archivo rechazados en un enlace. `write-url-display.test.ts` sigue en verde.
 
 **Validado en real** en el curso de pruebas, por el flujo MCP: el alta con `open` y sin `display` (queda el valor por defecto del sitio, forzar descarga), las seis presentaciones con el archivo y los demás ajustes intactos, y de `force_download` a `open` con su deshacer. Todo `aplicado_verificado`. Lo que recibe el navegador coincide con cada presentación: `open` redirige al archivo servido `inline`, `force_download` lo sirve como `attachment`, `embed` lo muestra en un iframe, y `new_window` y `popup` lo abren con `window.open`. El sitio no habilita el marco.
+
+
+## ADR-132 · Calificación de entregas grupales
+
+**Fecha:** 2026-11-05 · **Estado:** implementación y pruebas sintéticas; prueba real en sandbox pendiente.
+
+`campus_plan_grade_advanced` acepta `apply_to_group=true` y un `group_id` explícito, además del participante representante. Sólo admite puntos o escala y comentario; no admite en esta vía rúbrica, guía, adjuntos, workflow ni notificaciones. Resuelve los grupos del agrupamiento de entrega, exige una pertenencia única por integrante y contrasta participantes y matriculados. El plan R3 muestra integrantes, antes y después, y fija como precondiciones la composición, la entrega, los formularios y el estado del libro por integrante.
+
+Cada escritura afecta a una persona con `applytoall=0`, evitando el grupo por defecto de Moodle. Se verifica cada formulario y nota contra la tarea y el libro. Los integrantes que ya tienen el estado pedido no se reescriben. Las escrituras son secuenciales y no atómicas: el motor declara una aplicación parcial y no reintenta. No hay deshacer automático grupal. Un plan nuevo permite completar lo pendiente tras una aplicación parcial.
+
+**Alcance de evidencia:** pruebas sintéticas para el flujo completo; en un sandbox real se verificó la guarda ante ausencia de entrega, no una calificación grupal. No se modifican entregas reales para validar.

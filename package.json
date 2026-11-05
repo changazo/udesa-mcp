@@ -1,6 +1,6 @@
 {
   "name": "udesa-campus-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "MCP no oficial para el Campus Virtual (Moodle) de UdeSA: lecturas y escrituras, local (STDIO) o remoto privado (Vercel).",
   "type": "module",

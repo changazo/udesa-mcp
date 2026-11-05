@@ -119,7 +119,7 @@ async function build(input: Input, ctx: IntentContext, undoOf: string | null): P
     if (max === 0) throw new CampusError("WRITE_NOT_ALLOWED", "La tarea no tiene calificación.");
     if (a.markingworkflow) throw new CampusError("WRITE_NOT_ALLOWED", "La tarea usa flujo de trabajo de calificación: usá campus_plan_grade_advanced, que maneja su estado (ADR-095).");
     if (a.blindmarking && !a.revealidentities) throw new CampusError("WRITE_NOT_ALLOWED", "Corrección anónima: no se califica por esta vía (y nunca se revelan identidades).");
-    if (a.teamsubmission) throw new CampusError("WRITE_NOT_ALLOWED", "Entrega grupal: todavía no se califica por esta vía (riesgo del «grupo por defecto» [T §2.9]).");
+    if (a.teamsubmission) throw new CampusError("WRITE_NOT_ALLOWED", "Entrega grupal: usá campus_plan_grade_advanced con apply_to_group=true y group_id explícito.");
     // ADR-099: con rúbrica o guía, la nota sale de los criterios. Sin sesión web no se puede saber, pero Moodle rechaza el guardado incompleto.
     const method = a.cmid ? await gradingArea(ctx, input.course_id, a.cmid).then((x) => x.method).catch((e: unknown) => (e instanceof CampusError && e.code === "AUTH_REQUIRED" ? null : Promise.reject(e))) : null;
     if (method) throw new CampusError("WRITE_NOT_ALLOWED", `La tarea se califica con ${method === "rubric" ? "rúbrica" : "guía de evaluación"}: usá campus_plan_grade_advanced (niveles o puntajes por criterio).`);
