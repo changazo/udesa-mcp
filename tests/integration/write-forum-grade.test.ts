@@ -6,8 +6,8 @@ import { makeWriteHarness, type WriteHarness } from "../fixtures/write-harness.j
 
 const CM = 9302;
 const CTX = 8652;
-async function harness(max = 10, notifiable: number[] = []) {
-    const h = await makeWriteHarness({ policy: { courses: { [String(COURSE)]: ["grade_forum"] }, notifiable_user_ids: notifiable } });
+async function harness(max = 10, notifiable: number[] = [], defaultNotify = false, allowNotify = false) {
+    const h = await makeWriteHarness({ policy: { courses: { [String(COURSE)]: ["grade_forum"] }, notifiable_user_ids: notifiable, notify_students_default: defaultNotify, allow_participant_notifications: allowNotify } });
     h.w2.extraModules.push({ id: CM, modname: "forum", name: "Debate", section: 1, visible: true, contextid: CTX });
     h.fake.overrides.set("mod_forum_get_forums_by_courses", () => [{ id: 3302, cmid: CM, course: COURSE, name: "Debate", grade_forum: max }]);
     const grades = new Map<number, number>();
@@ -81,6 +81,19 @@ describe("calificar el foro completo (ADR-070)", () => {
         expect(p.payload_preview).toMatchObject({ notify_student: true });
         expect((await exec(t.h, p.plan_id)).status).toBe("aplicado_verificado");
         expect(t.stores[0]).toMatchObject({ notifyuser: true });
+    });
+
+    it("respeta el valor por defecto del perfil y permite no notificar explícitamente", async () => {
+        const t = await harness(10, [], true, true);
+        const p = await plan(t.h, { grade: 6 });
+        expect(p.payload_preview).toMatchObject({ notify_student: true });
+        expect((await exec(t.h, p.plan_id)).status).toBe("aplicado_verificado");
+        expect(t.stores[0]).toMatchObject({ notifyuser: true });
+        const u = await t.h.app.engine.planUndo((await exec(t.h, (await plan(t.h, { grade: 7, notify_student: false })).plan_id)).action_id, "test");
+        if (!u.undoable) throw new Error(u.reason);
+        expect((await exec(t.h, u.plan.plan_id)).status).toBe("aplicado_verificado");
+        expect(t.stores.slice(1)).toEqual(expect.arrayContaining([expect.objectContaining({ notifyuser: false })]));
+        expect(t.stores[2]).toMatchObject({ notifyuser: false });
     });
 
     it("allowlist: notifyuser no booleano, otro componente o formdata con más campos, rechazados", () => {

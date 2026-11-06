@@ -8,8 +8,8 @@ import { makeWriteHarness } from "../fixtures/write-harness.js";
 
 const GROUP = 12, OTHER = 13, GROUPING = 99;
 
-async function harness() {
-    const h = await makeWriteHarness({ policy: { courses: { [String(COURSE)]: ["grade_submission", "edit_activity"] } } });
+async function harness(opts: { allowNotify?: boolean; notifiable?: number[]; defaultNotify?: boolean } = {}) {
+    const h = await makeWriteHarness({ policy: { courses: { [String(COURSE)]: ["grade_submission", "edit_activity"] }, allow_participant_notifications: opts.allowNotify ?? false, notifiable_user_ids: opts.notifiable ?? [], notify_students_default: opts.defaultNotify ?? false } });
     const acts = new SyntheticActivities(h.fake, h.w2);
     const g = new SyntheticGrading(h.fake, h.w2, acts);
     g.method = "scale";
@@ -136,12 +136,40 @@ describe("calificación de entrega grupal", () => {
         expect(result.items.find((i) => i.item_id === "i2")?.verification.differences).toEqual(expect.arrayContaining([expect.objectContaining({ field: "libro de calificaciones" })]));
     });
 
-    it("rechaza archivos, notificaciones y ámbitos de grupo incorrectos", async () => {
+    it("rechaza archivos y ámbitos de grupo incorrectos", async () => {
         const { h, g } = await harness();
-        expect((await error(h.app.engine.plan("grade_advanced", { ...request, notify_student: true }, "test"))).code).toBe("WRITE_NOT_ALLOWED");
         expect((await error(h.app.engine.plan("grade_advanced", { ...request, add_feedback_file_paths: ["/tmp/a"] }, "test"))).code).toBe("WRITE_NOT_ALLOWED");
         expect((await error(h.app.engine.plan("grade_advanced", { ...request, group_id: 999 }, "test"))).code).toBe("RESOURCE_OUT_OF_SCOPE");
         expect(g.posts).toHaveLength(0);
+    });
+
+    it("solicita avisar a cada integrante cuando el perfil lo permite", async () => {
+        const { h, g } = await harness({ allowNotify: true });
+        const plan = await h.app.engine.plan("grade_advanced", { ...request, notify_student: true }, "test");
+        expect(plan.payload_preview.notify_student).toBe(true);
+        expect(plan.side_effects.join(" ")).toMatch(/notificar a cada integrante/);
+        expect((await h.app.engine.execute(plan.plan_id, h.confirmer, "test")).status).toBe("aplicado_verificado");
+        expect(g.posts).toHaveLength(2);
+        expect(g.posts.every((x) => x.applytoall === "0" && x.sendstudentnotifications === "1")).toBe(true);
+    });
+
+    it("exige permiso para todos los integrantes antes de abrir formularios o guardar", async () => {
+        const { h, g } = await harness({ notifiable: [STUDENT_A] });
+        expect((await error(h.app.engine.plan("grade_advanced", { ...request, notify_student: true }, "test"))).code).toBe("WRITE_NOT_ALLOWED");
+        expect(g.posts).toHaveLength(0);
+    });
+
+    it("usa la preferencia del perfil y permite desactivarla explícitamente", async () => {
+        const { h, g } = await harness({ allowNotify: true, defaultNotify: true });
+        const p = await h.app.engine.plan("grade_advanced", { ...request, notify_student: false }, "test");
+        expect(p.payload_preview.notify_student).toBe(false);
+        expect((await h.app.engine.execute(p.plan_id, h.confirmer, "test")).status).toBe("aplicado_verificado");
+        expect(g.posts.every((x) => x.sendstudentnotifications === "0")).toBe(true);
+        const other = await harness({ allowNotify: true, defaultNotify: true });
+        const defaultPlan = await other.h.app.engine.plan("grade_advanced", request, "test");
+        expect(defaultPlan.payload_preview.notify_student).toBe(true);
+        expect((await other.h.app.engine.execute(defaultPlan.plan_id, other.h.confirmer, "test")).status).toBe("aplicado_verificado");
+        expect(other.g.posts.every((x) => x.sendstudentnotifications === "1")).toBe(true);
     });
 
     it("al replanificar una aplicación parcial no vuelve a escribir al integrante ya correcto", async () => {
@@ -155,6 +183,18 @@ describe("calificación de entrega grupal", () => {
         expect(result.status).toBe("aplicado_verificado");
         expect(g.posts).toHaveLength(1);
         expect(Number(g.posts[0]!.userid)).toBe(STUDENT_B);
+    });
+
+    it("al replanificar con aviso no repite el aviso a quien ya quedó correcto", async () => {
+        const { h, g } = await harness({ allowNotify: true });
+        g.user(STUDENT_A).grade = "1";
+        g.user(STUDENT_A).comment = "<p>Reentrega, por favor.</p>";
+        const plan = await h.app.engine.plan("grade_advanced", { ...request, notify_student: true }, "test");
+        expect(plan.items.map((i) => i.target.user_id)).toEqual([STUDENT_B]);
+        expect(plan.side_effects.join(" ")).toMatch(/ya tienen el estado pedido.*no.*reciben este aviso/);
+        expect((await h.app.engine.execute(plan.plan_id, h.confirmer, "test")).status).toBe("aplicado_verificado");
+        expect(g.posts).toHaveLength(1);
+        expect(g.posts[0]).toMatchObject({ sendstudentnotifications: "1" });
     });
 
     it("reporta aplicación parcial si falla la segunda escritura", async () => {

@@ -4,8 +4,8 @@ import { COURSE, STUDENT_A, STUDENT_B, USER_ID } from "../fixtures/fake-moodle.j
 import { makeWriteHarness } from "../fixtures/write-harness.js";
 
 /** ADR-120: mensaje privado sólo a quien el perfil permite notificar. Datos inventados. */
-async function harness(notifiable: number[] = [STUDENT_A]) {
-    const h = await makeWriteHarness({ policy: { courses: { [String(COURSE)]: ["send_message"] }, notifiable_user_ids: notifiable } });
+async function harness(notifiable: number[] = [STUDENT_A], allowNotify = false) {
+    const h = await makeWriteHarness({ policy: { courses: { [String(COURSE)]: ["send_message"] }, notifiable_user_ids: notifiable, allow_participant_notifications: allowNotify } });
     const sent: { from: number; to: number; text: string; time: number }[] = [];
     h.fake.overrides.set("core_enrol_get_enrolled_users", () => [
         { id: STUDENT_A, fullname: "Estudiante A" },
@@ -49,6 +49,16 @@ describe("mensaje privado (ADR-120)", () => {
         expect((await errOf(h.app.engine.plan("send_message", { course_id: COURSE, participant_id: STUDENT_B, text: "x" }, "test"))).message).toMatch(/notifica siempre/);
         const none = await harness([]);
         expect((await errOf(none.h.app.engine.plan("send_message", { course_id: COURSE, participant_id: STUDENT_A, text: "x" }, "test"))).code).toBe("WRITE_NOT_ALLOWED");
+        expect(sent).toHaveLength(0);
+    });
+
+    it("con permiso general muestra al destinatario real sin llamarlo cuenta de prueba", async () => {
+        const { h, sent } = await harness([], true);
+        const p = await h.app.engine.plan("send_message", { course_id: COURSE, participant_id: STUDENT_B, text: "Hola." }, "test");
+        expect(p.risk).toBe("R3");
+        expect(p.payload_preview.to).toMatchObject({ id: STUDENT_B, name: "Estudiante B" });
+        expect(p.warnings.join(" ")).not.toMatch(/cuenta de prueba/i);
+        expect(p.side_effects.join(" ")).not.toMatch(/cuenta de prueba/i);
         expect(sent).toHaveLength(0);
     });
 });

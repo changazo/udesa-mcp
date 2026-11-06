@@ -341,7 +341,7 @@ async function build(input: Req, ctx: IntentContext, undoOf: string | null, allo
         base_risk: "R3",
         summary: `${undoOf ? "Deshacer: " : ""}Calificar a ${person.fullname ?? input.participant_id} en «${a.name ?? a.id}» (${form.kind === "points" ? "puntos" : form.kind === "scale" ? "escala" : form.kind === "rubric" ? "rúbrica" : "guía"}): ${changed.join(", ")}.${notify ? " Con aviso al estudiante." : " Sin notificar."}`,
         payload_preview: { assignment: { assignment_id: a.id, name: a.name ?? null, method: form.kind }, participant: { id: person.id, name: person.fullname ?? null }, before: prior, after: { ...prior, ...want }, scale: form.kind === "scale" ? form.scale : undefined, rubric: form.kind === "rubric" ? form.rubric.map((c) => ({ id: c.id, description: c.description, levels: c.levels })) : undefined, guide: form.kind === "guide" ? form.guide.map((c) => ({ id: c.id, shortname: c.shortname, max: c.max })) : undefined, files: planFiles.length ? planFiles.map((f) => ({ filename: f.filename, bytes: f.size })) : undefined },
-        side_effects: ["Libro de calificaciones: la nota pasa al ítem de la tarea.", notify ? "Moodle le avisa al estudiante que tiene una calificación nueva (cuenta de prueba del sandbox, ADR-120)." : "SIN notificación al estudiante (sendstudentnotifications=0).", ...(remove.length ? ["Los archivos de retroalimentación quitados se borran (no vuelven con el deshacer)."] : [])],
+        side_effects: ["Libro de calificaciones: la nota pasa al ítem de la tarea.", notify ? "Se solicita a Moodle notificar al estudiante; el canal y la entrega dependen de Moodle y de sus preferencias." : "SIN notificación al estudiante (sendstudentnotifications=0).", ...(remove.length ? ["Los archivos de retroalimentación quitados se borran (no vuelven con el deshacer)."] : [])],
         preconditions: { description: "La calificación no cambió desde el plan.", versions: { [`gradeform:${a.cmid}:${a.id}:${input.participant_id}`]: JSON.stringify(prior) } },
         undo: ungraded ? { kind: "ninguno", how: "No había nota: Moodle no permite volver a «sin nota» por el formulario.", until: null } : { kind: "compensación", how: "Volver a la nota, los niveles o puntajes, el comentario y el estado anteriores, y quitar los archivos agregados.", until: null },
         warnings,
@@ -365,9 +365,11 @@ async function build(input: Req, ctx: IntentContext, undoOf: string | null, allo
 /** Un plan explícito para el grupo, con una escritura individual por integrante (applytoall=0). */
 async function buildTeam(input: Req, ctx: IntentContext): Promise<PlanDraft> {
     if (!input.group_id) throw new CampusError("WRITE_NOT_ALLOWED", "Para calificar al grupo indicá su group_id explícito.");
-    if (input.rubric || input.guide || input.workflow_state || input.add_feedback_file_paths?.length || input.remove_feedback_files?.length || input.restore || input.notify_student) throw new CampusError("WRITE_NOT_ALLOWED", "La calificación grupal admite sólo puntos o escala y comentario, sin archivos, rúbrica, guía, flujo ni notificaciones.");
+    if (input.rubric || input.guide || input.workflow_state || input.add_feedback_file_paths?.length || input.remove_feedback_files?.length || input.restore) throw new CampusError("WRITE_NOT_ALLOWED", "La calificación grupal admite sólo puntos o escala y comentario, sin archivos, rúbrica, guía ni flujo.");
     if (input.grade === undefined && input.feedback_comment === undefined) throw new CampusError("WRITE_NOT_ALLOWED", "Indicá una calificación o comentario.");
     const team = await resolveTeam(ctx, input.course_id, input.assignment_id, input.group_id, input.participant_id);
+    const notify = input.notify_student ?? ctx.profile.policy.notify_students_default;
+    if (notify && !mayNotify(ctx.profile.policy, input.course_id, team.members.map((m) => m.id))) throw new CampusError("WRITE_NOT_ALLOWED", "El perfil no permite notificar a todos los integrantes del grupo.");
     const drafts: PlanDraft[] = [];
     const pending: PlanDraft[] = [];
     const versions: Record<string, string | number | null> = { [`gradegroup:${input.assignment_id}:${input.group_id}:${input.participant_id}`]: JSON.stringify(team) };
@@ -376,7 +378,7 @@ async function buildTeam(input: Req, ctx: IntentContext): Promise<PlanDraft> {
         if (book.locked || book.overridden) throw new CampusError("WRITE_NOT_ALLOWED", `La nota de ${member.id} está bloqueada o sobrescrita en el libro.`);
         versions[`gradebook:${input.assignment_id}:${member.id}`] = JSON.stringify(book);
         versions[`teamsubmission:${input.assignment_id}:${member.id}:group:${team.group_id}`] = JSON.stringify(await teamSubmissionState(ctx, input.assignment_id, member.id, team.group_id));
-        const draft = await build({ course_id: input.course_id, assignment_id: input.assignment_id, participant_id: member.id, grade: input.grade, feedback_comment: input.feedback_comment, notify_student: false }, ctx, null, true);
+        const draft = await build({ course_id: input.course_id, assignment_id: input.assignment_id, participant_id: member.id, grade: input.grade, feedback_comment: input.feedback_comment, notify_student: notify }, ctx, null, true);
         Object.assign(versions, draft.preconditions.versions);
         drafts.push(draft);
         if (JSON.stringify(draft.payload_preview.before) !== JSON.stringify(draft.payload_preview.after)) pending.push(draft);
@@ -385,12 +387,12 @@ async function buildTeam(input: Req, ctx: IntentContext): Promise<PlanDraft> {
     if (!pending.length) throw new CampusError("WRITE_NOT_ALLOWED", "Todas las calificaciones y devoluciones del grupo ya están así.");
     return {
         intent: "grade_advanced", capability: "grade_submission", course_id: input.course_id, base_risk: "R3",
-        summary: `Calificar al grupo «${team.group_name}»: ${team.members.map((m) => m.name).join(", ")}. ${pending.length} de ${team.members.length} integrante(s) requieren cambios. Sin notificar.`,
-        payload_preview: { group: team, grades: drafts.map((d) => ({ ...d.payload_preview, changes_needed: JSON.stringify(d.payload_preview.before) !== JSON.stringify(d.payload_preview.after) })) },
-        side_effects: ["Se califica a cada integrante pendiente por separado con applytoall=0; no se usa el grupo por defecto.", "Los integrantes que ya tienen el estado pedido no se vuelven a escribir.", "Sin notificaciones. Las escrituras no son atómicas: si una falla, puede quedar una aplicación parcial."],
+        summary: `Calificar al grupo «${team.group_name}»: ${team.members.map((m) => m.name).join(", ")}. ${pending.length} de ${team.members.length} integrante(s) requieren cambios. ${notify ? "Con solicitud de aviso a quienes se califica." : "Sin notificar."}`,
+        payload_preview: { group: team, notify_student: notify, grades: drafts.map((d) => ({ ...d.payload_preview, changes_needed: JSON.stringify(d.payload_preview.before) !== JSON.stringify(d.payload_preview.after) })) },
+        side_effects: ["Se califica a cada integrante pendiente por separado con applytoall=0; no se usa el grupo por defecto.", "Los integrantes que ya tienen el estado pedido no se vuelven a escribir ni reciben este aviso.", notify ? "Se solicita a Moodle notificar a cada integrante cuya calificación se guarda; el canal y la entrega dependen de Moodle y de sus preferencias." : "Sin notificaciones.", "Las escrituras no son atómicas: si una falla, puede quedar una aplicación parcial."],
         preconditions: { description: "El grupo, sus integrantes, las notas del libro y los formularios no cambiaron desde el plan.", versions },
         undo: { kind: "ninguno", how: "La calificación grupal no tiene deshacer automático; revisar cada integrante.", until: null },
-        warnings: ["La primera calificación no siempre puede volver a «sin nota» por el formulario.", ...new Set(drafts.flatMap((d) => d.warnings))],
+        warnings: ["La primera calificación no siempre puede volver a «sin nota» por el formulario.", ...(notify ? ["La verificación comprueba las calificaciones y comentarios, no la entrega efectiva de los avisos."] : []), ...new Set(drafts.flatMap((d) => d.warnings))],
         items: pending.flatMap((d, i) => d.items.map((item) => ({ ...item, item_id: `i${i + 1}`, target: { ...item.target, group_id: team.group_id } }))),
         prior_state: { group: true },
         untrusted_fields: ["payload_preview.group.group_name", "payload_preview.group.members", "payload_preview.grades"],
@@ -402,7 +404,7 @@ const shape = {
     course_id: z.number().int().positive(),
     assignment_id: z.number().int().positive().describe("assignment_id (no el course_module_id)."),
     participant_id: z.number().int().positive(),
-    apply_to_group: z.boolean().optional().describe("En entrega grupal, true califica a todos los integrantes de group_id, uno por uno y sin notificar."),
+    apply_to_group: z.boolean().optional().describe("En entrega grupal, true califica a los integrantes pendientes de group_id, uno por uno."),
     group_id: z.number().int().positive().optional().describe("Grupo de entrega explícito, obligatorio si apply_to_group=true."),
     grade: z.union([z.number(), z.string().max(255)]).optional().describe("Puntos, o el ítem de la ESCALA (su texto o su valor). Con rúbrica o guía no va: la nota sale de los criterios."),
     rubric: z.array(z.strictObject({ criterion: z.union([z.string().max(2_000), z.number().int()]).describe("Texto del criterio o su id."), level: z.union([z.string().max(2_000), z.number()]).describe("Texto del nivel, su puntaje o su id."), remark: z.string().max(5_000).optional() })).max(30).optional().describe("Rúbrica: un nivel por criterio (los que no se indican quedan como están)."),
@@ -411,13 +413,13 @@ const shape = {
     add_feedback_file_paths: z.array(z.string().min(1).max(1_000)).max(10).optional().describe("Archivos LOCALES de retroalimentación a agregar (sólo en el servidor local)."),
     remove_feedback_files: z.array(z.string().min(1).max(255)).max(20).optional().describe("Nombres de archivos de retroalimentación a quitar."),
     workflow_state: z.enum(WORKFLOW).optional().describe("Flujo de trabajo: notmarked, inmarking, readyforreview, inreview o readyforrelease (nunca released)."),
-    notify_student: z.boolean().optional().describe("Avisarle al estudiante (por defecto, el del perfil: no). Sólo si el perfil permite notificarle (cuentas de prueba del sandbox, ADR-115)."),
+    notify_student: z.boolean().optional().describe("Solicitar a Moodle que avise a cada estudiante calificado; por defecto se usa la política del perfil. Requiere permiso para todos los destinatarios."),
 };
 
 export const gradeAdvancedIntent: WriteIntent<typeof shape> = {
     name: "grade_advanced",
     title: "Plan: calificar con escala, rúbrica o guía, y archivos de retroalimentación",
-    description: "Arma el plan para calificar a un participante por puntos, escala, rúbrica o guía, con comentario, archivos y flujo de trabajo. En una entrega grupal, apply_to_group=true y group_id califican a cada integrante con puntos o escala y comentario, sin archivos ni notificaciones. La vista previa muestra afectados y valores. No escribe.",
+    description: "Arma el plan para calificar a un participante por puntos, escala, rúbrica o guía, con comentario, archivos y flujo de trabajo. En una entrega grupal, apply_to_group=true y group_id califican a cada integrante pendiente con puntos o escala y comentario, sin archivos; notify_student solicita el aviso si el perfil lo permite. La vista previa muestra afectados y valores. No escribe.",
     inputShape: shape,
     capability: "grade_submission",
     synthetic_only: false,

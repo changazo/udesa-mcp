@@ -15,7 +15,7 @@
       "max_actions_per_day": 2000,
       "max_messages_per_day": 20
     },
-    "notify_students_default": false,
+    "notify_students_default": true,
     "require_out_of_band_from_risk": "nunca",
     "human_in_the_loop_from_risk": "R3",
     "audit_teacher_text": false,

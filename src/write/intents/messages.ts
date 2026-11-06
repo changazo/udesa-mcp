@@ -61,7 +61,7 @@ export const sendMessageIntent: WriteIntent<typeof shape> = {
     name: "send_message",
     title: "Plan: mensaje privado a un participante",
     description:
-        "Arma el plan para mandar UN mensaje privado del Campus a UN participante del curso. Siempre le llega una notificación (y puede llegarle por correo): con el perfil actual sólo a las cuentas de prueba del sandbox. No se puede retirar para el destinatario. No escribe.",
+        "Arma el plan para mandar UN mensaje privado del Campus a UN participante del curso, si la política permite notificarlo. Puede generar avisos por correo o en la app según Moodle y las preferencias del destinatario. No se puede retirar para el destinatario. No escribe.",
     inputShape: shape,
     capability: "send_message",
     synthetic_only: false,
@@ -84,10 +84,10 @@ export const sendMessageIntent: WriteIntent<typeof shape> = {
             base_risk: "R3",
             summary: `Mandar un mensaje privado a «${user.fullname ?? user.id}» (${user.id}).`,
             payload_preview: { to: { id: user.id, name: user.fullname ?? null }, text: input.text },
-            side_effects: ["Le llega una notificación en el Campus (y, según sus preferencias, por correo o en la app).", "No se puede retirar: borrarlo después sólo lo borra de tu lado."],
+            side_effects: ["El mensaje puede generar avisos por correo o en la app según Moodle y las preferencias del destinatario.", "No se puede retirar: borrarlo después sólo lo borra de tu lado."],
             preconditions: { description: "Sin precondición.", versions: {} },
             undo: { kind: "ninguno", how: "Un mensaje enviado no se retira para el destinatario.", until: null },
-            warnings: ["Notifica al destinatario (cuenta de prueba del sandbox, ADR-115)."],
+            warnings: ["Se envía al destinatario indicado; el canal de aviso depende de Moodle y de sus preferencias."],
             items: [
                 {
                     item_id: "i1",

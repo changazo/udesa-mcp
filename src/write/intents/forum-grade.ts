@@ -71,7 +71,7 @@ function draftFor(courseId: number, f: { cmid: number; name: string; contextId: 
         base_risk: "R3",
         summary: `${undoOf ? "Deshacer: " : ""}Nota del foro «${f.name}» para el participante ${user.id}: ${show(prior)} → ${show(grade)}.`,
         payload_preview: { forum: { course_module_id: f.cmid, name: f.name, max_grade: f.max }, participant: { id: user.id, name: user.name }, before: show(prior), after: show(grade), notify_student: notify },
-        side_effects: ["Actualiza el libro de calificaciones del curso (puede cambiar totales).", notify ? "Moodle le manda un mensaje inmediato al estudiante (cuenta de prueba del sandbox, ADR-120)." : "Sin mensaje al estudiante (notifyuser=false)."],
+        side_effects: ["Actualiza el libro de calificaciones del curso (puede cambiar totales).", notify ? "Se solicita a Moodle enviar un mensaje al estudiante; el canal depende de Moodle y de sus preferencias." : "Sin mensaje al estudiante (notifyuser=false)."],
         preconditions: { description: "La nota no cambió desde el plan.", versions: { [`fgrade:${f.contextId}:${user.id}`]: String(prior) } },
         undo: { kind: "exacto", how: prior === null ? "Limpiar la nota." : `Volver a ${prior}.`, until: null },
         warnings: [],
@@ -96,13 +96,13 @@ const shape = {
     course_module_id: z.number().int().positive().describe("cmid de un foro del curso con calificación del foro completo (en puntos)."),
     participant_id: z.number().int().positive(),
     grade: z.number().min(0).max(100).nullable().describe("Nota en puntos (hasta 2 decimales); null = limpiar la nota."),
-    notify_student: z.boolean().optional().describe("Mandarle un mensaje al estudiante (por defecto no). Sólo si el perfil permite notificarle (cuentas de prueba del sandbox, ADR-115)."),
+    notify_student: z.boolean().optional().describe("Solicitar un mensaje al estudiante, si la política del perfil lo permite."),
 };
 
 export const forumGradeIntent: WriteIntent<typeof shape> = {
     name: "forum_grade",
     title: "Plan: calificar el foro completo de un participante",
-    description: "Arma el plan para poner (o limpiar) la nota del foro completo de UN participante, sin mensaje al estudiante salvo notify_student (sólo cuentas de prueba del sandbox). Sólo foros con calificación por puntos. No escribe.",
+    description: "Arma el plan para poner (o limpiar) la nota del foro completo de UN participante. Puede solicitar un mensaje si la política del perfil lo permite. Sólo foros con calificación por puntos. No escribe.",
     inputShape: shape,
     capability: "grade_forum",
     synthetic_only: false,
@@ -123,7 +123,7 @@ export const forumGradeIntent: WriteIntent<typeof shape> = {
         if (grade !== null && grade > max) throw new CampusError("WRITE_NOT_ALLOWED", `La nota máxima del foro es ${max}.`);
         const prior = await fetchGrade(ctx, mod.contextid, user.id);
         if (prior === grade) throw new CampusError("WRITE_NOT_ALLOWED", "Esa ya es la nota actual.");
-        const notify = input.notify_student ?? false;
+        const notify = input.notify_student ?? ctx.profile.policy.notify_students_default;
         if (notify && !mayNotify(ctx.profile.policy, input.course_id, [user.id])) throw new CampusError("WRITE_NOT_ALLOWED", "Notificar a este estudiante no está permitido por el perfil (allow_participant_notifications=false y no es una cuenta de prueba del sandbox, ADR-115).");
         return draftFor(input.course_id, { cmid: mod.id, name: forum?.name ?? mod.name ?? String(mod.id), contextId: mod.contextid, max }, { id: user.id, name: user.fullname ?? null }, prior, grade, null, notify);
     },

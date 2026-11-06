@@ -141,7 +141,8 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [129](#adr-129--archivos-que-entrega-chatgpt-en-el-remoto) | Archivos que entrega ChatGPT en el remoto | adoptada |
 | [130](#adr-130--notificaciones-a-participantes-habilitadas) | Notificaciones a participantes habilitadas | adoptada |
 | [131](#adr-131--presentación-de-archivos-display) | Presentación de archivos (`display`) | adoptada |
-| [132](#adr-132--calificación-de-entregas-grupales) | Calificación de entregas grupales | implementada; validación real pendiente |
+| [132](#adr-132--calificación-de-entregas-grupales) | Calificación de entregas grupales | validada en una entrega real |
+| [133](#adr-133--avisos-en-calificaciones-grupales) | Avisos en calificaciones grupales | implementada; pruebas sintéticas |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -2267,10 +2268,21 @@ Falta la prueba con una cuenta de estudiante, que necesita su inicio de sesión.
 
 ## ADR-132 · Calificación de entregas grupales
 
-**Fecha:** 2026-11-05 · **Estado:** implementación y pruebas sintéticas; prueba real en sandbox pendiente.
+**Fecha:** 2026-11-05 · **Estado:** implementación con pruebas sintéticas y una calificación real; prueba en sandbox pendiente.
 
-`campus_plan_grade_advanced` acepta `apply_to_group=true` y un `group_id` explícito, además del participante representante. Sólo admite puntos o escala y comentario; no admite en esta vía rúbrica, guía, adjuntos, workflow ni notificaciones. Resuelve los grupos del agrupamiento de entrega, exige una pertenencia única por integrante y contrasta participantes y matriculados. El plan R3 muestra integrantes, antes y después, y fija como precondiciones la composición, la entrega, los formularios y el estado del libro por integrante.
+`campus_plan_grade_advanced` acepta `apply_to_group=true` y un `group_id` explícito, además del participante representante. Sólo admite puntos o escala y comentario; no admite en esta vía rúbrica, guía, adjuntos ni workflow; los avisos se amplían en ADR-133. Resuelve los grupos del agrupamiento de entrega, exige una pertenencia única por integrante y contrasta participantes y matriculados. El plan R3 muestra integrantes, antes y después, y fija como precondiciones la composición, la entrega, los formularios y el estado del libro por integrante.
 
 Cada escritura afecta a una persona con `applytoall=0`, evitando el grupo por defecto de Moodle. Se verifica cada formulario y nota contra la tarea y el libro. Los integrantes que ya tienen el estado pedido no se reescriben. Las escrituras son secuenciales y no atómicas: el motor declara una aplicación parcial y no reintenta. No hay deshacer automático grupal. Un plan nuevo permite completar lo pendiente tras una aplicación parcial.
 
 **Alcance de evidencia:** pruebas sintéticas para el flujo completo; en un sandbox real se verificó la guarda ante ausencia de entrega, no una calificación grupal. No se modifican entregas reales para validar.
+
+
+## ADR-133 · Avisos en calificaciones grupales
+
+**Fecha:** 2026-11-05 · **Estado:** implementación con pruebas sintéticas.
+
+En el plan de calificación grupal, `notify_student` determina si se solicita a Moodle avisar a los integrantes cuya calificación se modifica; si se omite, rige `notify_students_default` del perfil. Se exige que la política permita notificar a todos los miembros antes de construir el plan. Cada formulario lleva `applytoall=0` y la opción de notificación explícita. Los ya correctos no se vuelven a guardar ni reciben aviso: un plan nuevo tras una aplicación parcial no duplica notificaciones a los ya procesados. El plan indica a quiénes se califica, qué aviso se solicita y que la escritura puede ser parcial. La relectura verifica nota y comentario, no la entrega efectiva de la notificación; su canal depende de Moodle y las preferencias del usuario. No reenvía avisos retroactivamente.
+
+Por decisión del docente, el perfil establece `notify_students_default: true`; las calificaciones de tareas y foros solicitan aviso por defecto y admiten `notify_student: false` para desactivarlo. Los deshacer siguen sin avisar.
+
+Se corrigen las descripciones y advertencias de mensajes y calificación que identificaban erróneamente como cuenta de prueba a cualquier destinatario, aunque el perfil general habilita las notificaciones. Los mensajes siguen siendo de a uno, R3 y con aprobación explícita previa.

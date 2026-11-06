@@ -15,7 +15,7 @@ import { gradingArea } from "./grading-definition.js";
  * - `attemptnumber` (omitido = PRIMER intento [T §7.4]); el del último intento leído;
  * - `applytoall` = 0 (omitido = 1: aplica a todo el grupo);
  * - `addattempt` = 0 (no reabre);
- * - `sendstudentnotifications` explícito (por defecto el del perfil: no);
+ * - `sendstudentnotifications` explícito (por defecto el del perfil);
  * - el comentario de devolución se reenvía siempre (omitirlo puede anularlo [T §2.4]).
  * Rechazos en el plan: nota bloqueada o sobrescrita en el libro de calificaciones, rúbrica o guía,
  * marking workflow y escala (para eso está campus_plan_grade_advanced, ADR-095), corrección anónima, fuera de rango.
@@ -107,7 +107,7 @@ const shape = {
     participant_id: z.number().int().positive(),
     grade: z.union([z.number(), z.string().max(20)]).describe("Nota en puntos (acepta coma decimal)."),
     feedback_comment: z.string().max(20_000).optional().describe("Comentario de devolución (Markdown). Ausente = se conserva el actual."),
-    notify_student: z.boolean().optional().describe("Por defecto, el del perfil (no). Notificar exige allow_participant_notifications."),
+    notify_student: z.boolean().optional().describe("Por defecto, se usa la política del perfil. Notificar requiere permiso para el destinatario."),
 };
 
 type Input = { course_id: number; assignment_id: number; participant_id: number; grade: number | string | null; feedback_html?: string; feedback_markdown?: string; notify_student?: boolean };
@@ -174,7 +174,7 @@ async function build(input: Input, ctx: IntentContext, undoOf: string | null): P
         side_effects: [
             "Libro de calificaciones: la nota pasa al ítem de la tarea (si la tarea está oculta, el ítem también).",
             "Eventos submission_graded. Puede aplicar penalización por entrega tardía (5.x).",
-            notify ? "El estudiante recibe un mensaje en menos de un minuto: NO se puede deshacer." : "Sin notificación al estudiante.",
+            notify ? "Se solicita a Moodle notificar al estudiante; el canal y la entrega dependen de Moodle y de sus preferencias. Una notificación enviada no se puede deshacer." : "Sin notificación al estudiante.",
         ],
         preconditions: { description: "La nota no cambió desde el plan.", versions: { [`grade:${a.id}:${input.participant_id}`]: `${prior.value ?? "none"}:${prior.timemodified}` } },
         undo:
@@ -201,7 +201,7 @@ async function build(input: Input, ctx: IntentContext, undoOf: string | null): P
 export const gradeIntent: WriteIntent<typeof shape> = {
     name: "grade",
     title: "Plan: calificar y devolver una entrega",
-    description: "Arma el plan para poner la nota (en puntos) y el comentario de devolución de UN participante en una tarea del curso. No escribe. Por defecto no notifica al estudiante.",
+    description: "Arma el plan para poner la nota (en puntos) y el comentario de devolución de UN participante en una tarea del curso. La notificación sigue la política del perfil salvo que se indique notify_student. No escribe.",
     inputShape: shape,
     capability: "grade_submission",
     synthetic_only: false,
