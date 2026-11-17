@@ -10,40 +10,40 @@ import type { Difference } from "./plan.js";
  * espacios, pero nunca puede perderse una tabla, un atributo o el texto de otra celda sin que se note).
  */
 
-type Node = DefaultTreeAdapterMap["node"];
-type Element = DefaultTreeAdapterMap["element"];
-type TextNode = DefaultTreeAdapterMap["textNode"];
+export type Node = DefaultTreeAdapterMap["node"];
+export type Element = DefaultTreeAdapterMap["element"];
+export type TextNode = DefaultTreeAdapterMap["textNode"];
 
-const isEl = (n: Node): n is Element => "tagName" in n;
-const isText = (n: Node): n is TextNode => n.nodeName === "#text";
-const kids = (n: Node): Node[] => ("childNodes" in n ? (n.childNodes as Node[]) : []);
+export const isEl = (n: Node): n is Element => "tagName" in n;
+export const isText = (n: Node): n is TextNode => n.nodeName === "#text";
+export const kids = (n: Node): Node[] => ("childNodes" in n ? (n.childNodes as Node[]) : []);
 
 /** Espacios colapsados (incluido el no separable). Sólo para buscar y comparar, nunca para reescribir. */
 export const norm = (s: string) => s.replace(/ /g, " ").replace(/\s+/g, " ").trim();
 
-function parse(html: string) {
+export function parse(html: string) {
     return parseFragment(html, { sourceCodeLocationInfo: true }) as unknown as Node;
 }
 
-function textOf(n: Node): string {
+export function textOf(n: Node): string {
     if (isText(n)) return n.value;
     return kids(n).map(textOf).join("");
 }
 
-function textNodes(n: Node, out: TextNode[] = []): TextNode[] {
+export function textNodes(n: Node, out: TextNode[] = []): TextNode[] {
     if (isText(n)) out.push(n);
     else for (const k of kids(n)) textNodes(k, out);
     return out;
 }
 
-function elements(n: Node, tag: string, out: Element[] = []): Element[] {
+export function elements(n: Node, tag: string, out: Element[] = []): Element[] {
     if (isEl(n) && n.tagName === tag) out.push(n);
     for (const k of kids(n)) elements(k, tag, out);
     return out;
 }
 
 /** Filas de UNA tabla (a través de thead/tbody/tfoot), sin entrar en tablas anidadas. */
-function rowsOf(table: Element): Element[] {
+export function rowsOf(table: Element): Element[] {
     const out: Element[] = [];
     const walk = (n: Node) => {
         for (const k of kids(n)) {
@@ -56,9 +56,9 @@ function rowsOf(table: Element): Element[] {
     return out;
 }
 
-const cellsOf = (tr: Element) => kids(tr).filter((k): k is Element => isEl(k) && (k.tagName === "td" || k.tagName === "th"));
-const attr = (e: Element, name: string) => e.attrs.find((a) => a.name === name)?.value ?? null;
-const same = (a: string, b: string) => norm(a).toLocaleLowerCase("es") === norm(b).toLocaleLowerCase("es");
+export const cellsOf = (tr: Element) => kids(tr).filter((k): k is Element => isEl(k) && (k.tagName === "td" || k.tagName === "th"));
+export const attr = (e: Element, name: string) => e.attrs.find((a) => a.name === name)?.value ?? null;
+export const same = (a: string, b: string) => norm(a).toLocaleLowerCase("es") === norm(b).toLocaleLowerCase("es");
 
 /** Escapa como TEXTO HTML: nunca se interpreta como marcado. */
 export const escapeText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -231,3 +231,11 @@ export function structureDifferences(expected: string, observed: string): Differ
     if (!out.length) out.push({ field: "html", expected: "misma estructura y atributos", observed: "difiere en atributos o en el texto fuera de las tablas" });
     return out;
 }
+
+/**
+ * Recorrido de sólo lectura para la revisión de contenido (ADR-139): el mismo parser y los mismos
+ * ayudantes que el parche, sin modificar nada.
+ */
+export type HtmlNode = Node;
+export type HtmlElement = Element;
+export { parse as parseHtmlFragment, isEl as isHtmlElement, isText as isHtmlText, kids as htmlChildren, textOf as htmlTextOf, attr as htmlAttr, rowsOf as htmlTableRows, cellsOf as htmlRowCells };

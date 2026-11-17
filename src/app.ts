@@ -3,6 +3,7 @@ import type { Renderer } from "./documents/render.js";
 import type { DownloadLinks } from "./remote/download-links.js";
 import { ContextCheckRecorder } from "./capabilities/report.js";
 import { CampusService } from "./domain/campus-service.js";
+import type { LinkCheckDeps } from "./domain/content-issues.js";
 import { createServer, type ServerDeps } from "./mcp/server.js";
 import type { FetchLike } from "./moodle/transport.js";
 import { CourseScope } from "./policy/course-scope.js";
@@ -35,6 +36,8 @@ export interface AppDeps {
     downloadLinks?: DownloadLinks | null;
     /** User-Agent de las peticiones web (ADR-121); por defecto el del servidor local. */
     webUserAgent?: string;
+    /** Pedidos a enlaces externos de la revisión de contenido (ADR-139); por defecto, fetch y DNS del sistema. */
+    linkCheck?: LinkCheckDeps;
 }
 
 export function createApp(deps: AppDeps) {
@@ -54,7 +57,7 @@ export function createApp(deps: AppDeps) {
               userAgent: deps.webUserAgent,
           })
         : null;
-    const service = new CampusService({ profile: deps.profile, session, registry, scope, recorder, logger: deps.logger, now: deps.now, web });
+    const service = new CampusService({ profile: deps.profile, session, registry, scope, recorder, logger: deps.logger, now: deps.now, web, linkCheck: deps.linkCheck });
     const serverDeps: ServerDeps = { profile: deps.profile, session, service, scope, recorder, metadata: deps.metadata, logger: deps.logger, downloadDir: deps.downloadDir ?? null, renderer: deps.renderer ?? null, downloadLinks: deps.downloadLinks ?? null };
     const server = () => createServer(serverDeps);
     return { session, registry, scope, recorder, service, server, serverDeps, web };

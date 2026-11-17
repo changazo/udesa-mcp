@@ -69,6 +69,7 @@ import { extractPdfText } from "../documents/pdf.js";
 import { isJunkEntry, readZipDirectory, readZipEntry, ZIP_LIMITS } from "../documents/zip.js";
 import { htmlToText, sliceText, sourceToText } from "./html.js";
 import { readActivityContent, type ActivityContentInput } from "./activity-content.js";
+import { analyzeHtml, checkLinks, LINK_CHECK_MAX, linksOf, selectContentTexts, summarize, withPageContents, type ContentIssue, type LinkCheckDeps, type PageContent } from "./content-issues.js";
 import { groupEventsInRange } from "./calendar-month.js";
 
 // ---------- Envelope común ----------
@@ -231,6 +232,8 @@ export interface ServiceDeps {
     now?: () => Date;
     /** Transporte web autenticado (opcional). Sin él, las lecturas web devuelven AUTH_REQUIRED. */
     web?: WebTransport | null;
+    /** Pedidos a enlaces externos de campus_get_content_issues (ADR-139); por defecto, fetch y DNS del sistema. Nunca el transporte de Moodle. */
+    linkCheck?: LinkCheckDeps;
 }
 
 export class CampusService {
@@ -1474,6 +1477,97 @@ export class CampusService {
                 truncation_reason: slice.truncated ? "Límite de caracteres; pedí char_offset=next_cursor." : null,
             },
             warnings: [],
+            content_policy: UNTRUSTED,
+        } satisfies SourceResult<unknown>;
+    }
+
+    // ---------- Revisión de accesibilidad y formato (ADR-139) ----------
+
+    /**
+     * Revisa el texto enriquecido del docente (resúmenes de sección, etiquetas, páginas y descripciones) con
+     * reglas heurísticas de accesibilidad y formato. Sólo lee. Con check_links verifica enlaces externos
+     * (sin credenciales ni cookies, nunca el Campus) en la primera página del resultado.
+     */
+    async getContentIssues(input: { course_id: number; section_number?: number; course_module_id?: number; check_links?: boolean; cursor?: string; limit?: number }) {
+        const courseId = input.course_id;
+        await this.assertCourse(courseId);
+        const at = this.now();
+        const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+        const filterKey = parseInt(nameHash(JSON.stringify(["content_issues", input.section_number ?? null, input.course_module_id ?? null])), 16);
+        let offset = 0;
+        if (input.cursor) {
+            const c = decodeCursor<ReportCursor>(input.cursor);
+            if (c.c !== courseId || c.f !== filterKey || c.l !== limit) throw new CampusError("RESOURCE_OUT_OF_SCOPE", "El cursor no corresponde a esta revisión (curso, sección, actividad o limit).");
+            offset = c.o;
+        }
+        const sections = await this.tracked("read_course", courseId, () => this.t.call("core_course_get_contents", { courseid: courseId }, CourseContentsSchema));
+        const selection = selectContentTexts(sections, { section_number: input.section_number, course_module_id: input.course_module_id });
+        const fns = ["core_course_get_contents"];
+        const warnings: string[] = [
+            "Revisión heurística: señala problemas probables con una sugerencia; no reemplaza una evaluación con lector de pantalla. No juzga si un texto alternativo describe bien la imagen.",
+            "Contraste: sólo colores en línea (atributo style o <font color>), contra el fondo en línea más cercano o blanco si no hay; los colores del tema, de clases CSS y de imágenes no se evalúan.",
+        ];
+        const omitted: { what: string; count: number | null; reason: string }[] = [];
+        let pages: PageContent[] | null = null;
+        if (selection.pages) {
+            try {
+                const res = await this.tracked("read_resources", courseId, () => this.t.call("mod_page_get_pages_by_courses", { courseids: [courseId] }, PagesSchema));
+                pages = res.pages.filter((p) => p.course === courseId);
+                fns.push("mod_page_get_pages_by_courses");
+            } catch (e) {
+                // Si lo pedido es sólo esa página, el error es la respuesta; si no, se informa como cobertura parcial.
+                if (!(e instanceof CampusError) || e.code === "AUTH_REQUIRED" || e.code === "NETWORK_ERROR" || input.course_module_id !== undefined) throw e;
+                warnings.push(`No se pudo leer el contenido de las páginas (${e.code}): se revisaron sólo sus descripciones.`);
+            }
+        }
+        const { texts, missing, non_html } = withPageContents(selection, pages);
+        if (missing) omitted.push({ what: "contenido de páginas", count: missing, reason: pages ? "Moodle no devolvió esas páginas (ocultas o sin acceso)." : "No se pudo leer mod_page_get_pages_by_courses." });
+        if (non_html) omitted.push({ what: "páginas en texto plano o Markdown", count: non_html, reason: "No son HTML: no hay marcado que revisar." });
+
+        const issues: ContentIssue[] = [];
+        const kinds = { section_summary: 0, label: 0, page: 0, description: 0 };
+        for (const t of texts) {
+            kinds[t.location.kind]++;
+            issues.push(...analyzeHtml(t.html, t.location));
+        }
+
+        let linkChecks: Record<string, unknown> | null = null;
+        if (input.check_links && input.cursor) warnings.push("La verificación de enlaces se hace sólo en la primera página (sin cursor): esta página no la repite.");
+        else if (input.check_links) {
+            const found = texts.flatMap((t) => linksOf(t.html).map((url) => ({ url, location: t.location })));
+            const r = await checkLinks(found, this.p.site_url, this.deps.linkCheck);
+            const count = (s: string) => r.results.filter((x) => x.status === s).length;
+            linkChecks = { distinct_links: r.distinct, checked: r.results.length, ok: count("ok"), roto: count("roto"), no_verificado: count("no_verificado"), results: r.results };
+            if (r.skipped) omitted.push({ what: "enlaces sin verificar por límite", count: r.skipped, reason: `Se verifican hasta ${LINK_CHECK_MAX} enlaces distintos por llamada; pedí por section_number o course_module_id para el resto.` });
+            warnings.push("Enlaces: «roto» sólo con HTTP 404 o 410. Sin respuesta, con acceso restringido o con errores del servidor quedan «no_verificado». Los enlaces al Campus no se piden (requieren sesión). Los pedidos salen sin cookies ni token.");
+        }
+
+        const slice = issues.slice(offset, offset + limit);
+        const next = offset + slice.length < issues.length ? encodeCursor<ReportCursor>({ v: 1, c: courseId, f: filterKey, l: limit, o: offset + slice.length }) : null;
+        return {
+            data: {
+                course_id: courseId,
+                filters: { section_number: input.section_number ?? null, course_module_id: input.course_module_id ?? null, check_links: input.check_links ?? false },
+                summary: { texts_inspected: texts.length, ...summarize(issues) },
+                inspected: { by_kind: kinds, sections: [...new Set(texts.map((t) => t.location.section_number))] },
+                issues: slice,
+                issue_range: { start: offset, end: offset + slice.length, total: issues.length },
+                link_checks: linkChecks,
+            },
+            source: this.source(courseId, fns, at, `${this.p.site_url}/course/view.php?id=${courseId}${input.section_number !== undefined ? `&section=${input.section_number}` : ""}`),
+            coverage: {
+                complete: next === null && offset === 0 && omitted.length === 0 && (pages !== null || !selection.pages),
+                consistency: "best_effort" as const,
+                pages_read: 1,
+                has_more: next !== null,
+                next_cursor: next,
+                truncation_reason: next ? `Página de ${limit} problemas; continuá con next_cursor.` : null,
+                detail: {
+                    scope: { course_id: courseId, section_number: input.section_number ?? null, course_module_id: input.course_module_id ?? null, check_links: input.check_links ?? false },
+                    ...(omitted.length ? { omitted } : {}),
+                },
+            },
+            warnings,
             content_policy: UNTRUSTED,
         } satisfies SourceResult<unknown>;
     }

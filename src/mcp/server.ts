@@ -58,6 +58,7 @@ export const TOOL_NAMES = [
     "campus_get_capabilities",
     "campus_list_courses",
     "campus_get_course",
+    "campus_get_content_issues",
     "campus_list_forums",
     "campus_list_announcements",
     "campus_get_discussion",
@@ -229,6 +230,25 @@ export function registerReadTools(server: McpServer, deps: ServerDeps): McpServe
             annotations: ReadOnly,
         },
         ({ course_id, section_number }) => run("campus_get_course", () => deps.service.getCourse(course_id, { section_number })),
+    );
+
+    server.registerTool(
+        "campus_get_content_issues",
+        {
+            title: "Revisión de accesibilidad y formato",
+            description:
+                "Revisa el texto enriquecido del curso (resúmenes de sección, etiquetas, contenido de páginas y descripciones de actividades) y devuelve problemas de accesibilidad y formato con una sugerencia concreta: imágenes sin texto alternativo, tablas sin encabezados, enlaces con texto vago («click aquí») o que abren otra pestaña sin avisar, contraste bajo en colores en línea, saltos de nivel de encabezado, encabezados vacíos, mayúsculas sostenidas y párrafos vacíos apilados. Con check_links verifica enlaces externos (hasta 30, sin cookies ni token; los del Campus no se piden). Sólo lee: no corrige nada. Heurística: citá sus warnings.",
+            inputSchema: {
+                course_id: courseId,
+                section_number: z.number().int().min(0).max(1000).optional().describe("Número de sección principal (0 = General): sólo esa sección y sus subsecciones."),
+                course_module_id: z.number().int().positive().optional().describe("cmid de un elemento (sale de campus_get_course): sólo su descripción y, si es una página, su contenido."),
+                check_links: z.boolean().optional().describe("Verificar enlaces externos http(s) (por defecto false). Sólo en la primera página del resultado."),
+                cursor: z.string().max(512).optional().describe("next_cursor de una llamada anterior (con los mismos filtros y limit)."),
+                limit: z.number().int().min(1).max(200).optional().describe("Problemas por página (por defecto 50)."),
+            },
+            annotations: ReadOnly,
+        },
+        (args) => run("campus_get_content_issues", () => deps.service.getContentIssues(args)),
     );
 
     server.registerTool(

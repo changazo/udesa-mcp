@@ -13,7 +13,7 @@ export type TextFormat = "markdown" | "html" | "texto";
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-function inline(s: string): string {
+export function inline(s: string): string {
     let out = esc(s);
     out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
     out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");

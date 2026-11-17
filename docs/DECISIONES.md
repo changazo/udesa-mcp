@@ -146,6 +146,10 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [134](#adr-134--freno-de-escrituras-con-recuperación-automática) | Freno de escrituras con recuperación automática | adoptada; modifica §5.8 de la directiva de escrituras |
 | [135](#adr-135--historial-de-entregas) | Historial de entregas | adoptada; validación real parcial |
 | [136](#adr-136--edición-conservativa-del-html-del-resumen-de-una-sección) | Edición conservativa del HTML del resumen de una sección | adoptada |
+| [137](#adr-137--más-ediciones-en-el-lugar-tablas-enlaces-y-otros-editores) | Más ediciones en el lugar: tablas, enlaces y otros editores | adoptada |
+| [138](#adr-138--componentes-visuales-con-esquema-cerrado) | Componentes visuales con esquema cerrado | adoptada |
+| [139](#adr-139--revisión-de-accesibilidad-y-formato-del-contenido) | Revisión de accesibilidad y formato del contenido | adoptada |
+| [140](#adr-140--vista-previa-de-cambios-de-texto-enriquecido) | Vista previa de cambios de texto enriquecido | adoptada |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -2453,3 +2457,160 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
 - `html-patch.test.ts` (11): celda con `<p><span style>`, tabla con imagen, enlaces, `data-*` y anchos, rechazos (duplicados, ausencias, texto distinto, nodos repartidos, celdas combinadas), escape, encabezados en `<th>` y espacios, precondición por `style` y por `href`, firma ante reformateo, pérdida detectada y conversor (tablas, alineación, barra escapada, rechazo sin separador, imágenes).
 - `write-section-patch.test.ts` (8): plan con una sola modificación, POST con formato 1, `@@PLUGINFILE@@` y el resto del formulario, verificado, deshacer exacto, Moodle que guarda el texto sin la tabla o sin un `style` (con diferencias), precondición obsoleta sin POST, rechazos, y el blindaje del reemplazo total (rechazo, R3 explícito, tabla Markdown como `<table>` y estructura verificada).
 - `write-edit-text.test.ts` (1 nuevo): página con tabla e imagen.
+
+## ADR-137 · Más ediciones en el lugar: tablas, enlaces y otros editores
+
+**Fecha:** 2026-11-17 · **Estatus:** adoptada · **Origen:** el dueño pidió extender la edición conservativa de ADR-136.
+
+**Decisión:**
+- **Textos editables en el lugar** (`src/write/html-targets.ts`): resumen de sección, texto de etiqueta, contenido de página, descripción de una actividad (los tipos con formulario de descripción) y contenido de un capítulo de libro.
+  - Para cada uno se sabe dónde leerlo tal como está guardado (su formulario, con las URLs de borrador normalizadas), con qué formulario se guarda (formato HTML, sin notificaciones) y cómo lo ven los estudiantes (la salida de los servicios; los capítulos no tienen esa lectura).
+  - La capacidad es la del tipo de texto: `rename_content` (secciones), `edit_activity` (etiquetas, páginas y descripciones) y `manage_activity_entries` (capítulos).
+- **Operaciones** (`src/write/html-ops.ts`), con la misma regla que ADR-136: se ubican nodos con parse5 y se reemplazan intervalos del original, sin reserializar. Cada operación se controla antes de enviar contra la firma estructural:
+  - Varias celdas en un cambio.
+  - Agregar una fila copiando el formato de otra: atributos y envoltorios de cada celda con los textos nuevos; una celda vacía recibe el texto en su elemento más interno.
+  - Quitar una fila de datos.
+  - Cambiar el `href` exacto de los enlaces, y su texto si era la propia dirección.
+  - Insertar un fragmento al principio o al final.
+- **Intenciones** sobre una mecánica común (`src/write/intents/html-edits.ts`), con un ítem por texto:
+  - Precondición: hash del HTML guardado de cada texto.
+  - Verificación: firma estructural de lo releído y, si corresponde, de la vista de los estudiantes (ADR-138).
+  - Deshacer: el HTML anterior completo de cada texto tocado.
+- **`patch_table`:** una operación por plan sobre cualquier texto editable.
+- **`replace_link`:** busca candidatos con los servicios (también con `&` escapado) y después lee el texto guardado de cada uno. No recorre capítulos de libros (habría que abrir cada capítulo).
+- `patch_section_summary` (ADR-136) queda igual.
+
+**Límites:**
+- Agregar una fila copia también los enlaces e imágenes de la fila modelo; los textos nuevos los indica el agente.
+- `replace_link` compara la dirección exacta: no normaliza variantes (barra final, mayúsculas, parámetros).
+
+**Tests:**
+- `html-ops.test.ts`: varias celdas, misma celda dos veces, fila nueva con el formato de la modelo, celda vacía, rechazos, quitar una fila, enlaces con texto y menciones sueltas.
+- `write-html-edits.test.ts`: tabla de una etiqueta con deshacer exacto; fila nueva en una página y fila quitada de un capítulo con deshacer; una sola operación por plan; precondición obsoleta por un estilo sin POST; tipo de texto equivocado; enlace en resumen, etiqueta y descripción sin tocar la mención suelta, con deshacer; rechazos.
+
+## ADR-138 · Componentes visuales con esquema cerrado
+
+**Fecha:** 2026-11-17 · **Estatus:** adoptada · **Origen:** el dueño.
+
+**Decisión:**
+- **`insert_component`:** el agente elige un componente y sus textos; el servidor arma el HTML (`src/write/components.ts`) con las clases de Bootstrap del tema. Nunca HTML libre.
+  - `alert` (recuadro de aviso), `card` (tarjeta con botón opcional), `button` (botón-enlace), `details` (desplegable), `columns` (dos columnas), `table` (con encabezados `th`) y `video` (YouTube por `youtube-nocookie.com`).
+  - Los textos pasan por el conversor Markdown, que escapa todo. Los enlaces sólo pueden ser http(s) o mailto; los videos, sólo de YouTube.
+- **Qué conserva el Campus.** Moodle limpia el HTML al mostrarlo, así que guardar no alcanza. Cada componente declara qué tiene que llegar a la vista de los estudiantes (por ejemplo, `div.alert-warning`, `details`/`summary` o un `iframe` con `src`).
+  - La verificación lo busca en la salida de los servicios: si falta, el resultado es `aplicado_con_diferencias`, con lo que no se ve.
+  - Así cada uso prueba el componente contra el Campus real. La prueba en el sandbox registra cuáles se ven.
+- **Nombres de parámetros:** `block` y `href`, no `component` ni `url`, para respetar la regla de §12 (ninguna herramienta acepta nombres de componentes de Moodle ni URLs genéricas).
+
+**Validado en real** en el curso de pruebas: el Campus muestra los siete componentes (clases de Bootstrap, `details`/`summary` e `iframe` de YouTube).
+
+**Límites:**
+- Los capítulos de libro no tienen lectura de la vista: allí sólo se verifica lo guardado.
+- Las clases dependen de la versión de Bootstrap del tema; la prueba real lo confirma.
+
+**Tests:**
+- `html-ops.test.ts`: HTML de cada componente, escape, enlaces y videos no admitidos, tipo libre rechazado e inserción sin tocar el resto.
+- `write-html-edits.test.ts`: aviso visible y verificado; aviso sin clases y video sin iframe en la vista dan `aplicado_con_diferencias` con lo que falta.
+
+## ADR-139 · Revisión de accesibilidad y formato del contenido
+
+**Fecha:** 2026-11-17 · **Estatus:** adoptada · **Origen:** pedido del dueño: revisar el texto enriquecido que escriben los docentes (resúmenes, etiquetas, páginas y descripciones), señalar problemas de accesibilidad y formato con sugerencias concretas y no escribir nada. La verificación de enlaces es opcional.
+
+**Decisión:**
+- **Herramienta nueva de lectura, `campus_get_content_issues`.** El nombre sigue la regla de POL-05 (`get/list/read/search`): `campus_check_content` no la cumplía. Se registra con las demás lecturas, así que está en `docente-lectura` y en `docente-completo`. No exige rol docente: revisa contenido que la cuenta ya puede leer. No hay datos de terceros.
+- **Fuentes.** `core_course_get_contents` da el resumen de cada sección, el texto de las etiquetas y la descripción de las actividades. `mod_page_get_pages_by_courses` da el contenido de las páginas y sólo se pide si hay páginas en el alcance. Las subsecciones (Moodle 5) se recorren dentro de su sección, como en `campus_get_course`. Las páginas en texto plano o Markdown no tienen marcado: se omiten y se informan en la cobertura.
+- **Filtros.** `section_number` toma una sección principal con sus subsecciones. `course_module_id` toma un elemento: su descripción y, si es una página, su contenido. El cmid de una subsección toma la subsección entera. Un filtro que no existe en el curso da `RESOURCE_OUT_OF_SCOPE`.
+- **Análisis.** El HTML se parsea con parse5, el parser de ADR-136, con ayudantes que `html-patch.ts` ahora exporta en un bloque aparte. Nada se reserializa ni se modifica. Reglas, cada una con severidad fija salvo el contraste:
+  - Imágenes: sin `alt` (`alta`); `alt` vacío sin marca de decorativa (`media`); `alt` con forma de nombre de archivo (`media`). Decorativa = `alt=""` más `role="presentation"` (o `none`, o `aria-hidden`): es lo que pone la casilla «Decorativa» del editor, y no es un problema. Un `aria-label` cuenta como alternativa.
+  - Tablas: sin `<th>` ni `<thead>`, con dos filas o más y sin `role="presentation"`. Sugiere marcar la primera fila como encabezado. Una tabla sin texto ni multimedia es otra regla (`baja`).
+  - Enlaces: sin nombre accesible (`alta`); texto vago, de una lista cerrada en castellano y en inglés comparada sin tildes ni signos («click aquí», «acá», «este enlace», «here», «read more»…) (`media`); la URL como texto (`baja`); `target="_blank"` sin aviso en el texto o en el `title` (`baja`).
+  - Contraste: sólo colores en línea (`style` o `<font color>`). Se compara contra el fondo en línea más cercano (`background-color`, `background` con un solo color o `bgcolor`) o contra blanco si no hay. Usa la relación WCAG 2.x y compone la transparencia. El umbral es 4.5:1, o 3:1 en texto grande (24 px, o 18,66 px en negrita; los encabezados usan los tamaños por defecto del navegador). `alta` por debajo de 3:1 y `media` entre 3 y 4.5. Un fondo con imagen, degradado o variable no se evalúa. Sólo cuenta el texto propio del elemento, sin el de descendientes que declaran su propio color.
+  - Encabezados: salto de nivel dentro de un mismo texto (h2 → h5) y encabezado vacío (`media`).
+  - Formato: un bloque de 40 letras o más, en seis palabras o más, con el 90 % en mayúsculas (`baja`); tres o más párrafos vacíos seguidos (sin texto, contando el espacio no separable, ni multimedia), con el texto anterior como referencia (`baja`).
+- **Evidencia.** Sólo texto, hasta 120 caracteres, nunca HTML. Las imágenes se identifican por el nombre del archivo, sin la query. Las URLs se muestran sin parámetros de acceso ni credenciales (`stripSecretParams`). Cada problema lleva su ubicación: `kind` (`section_summary`, `label`, `page` o `description`), `section_number`, `course_module_id`, `name` e `in_subsection`.
+- **Resultado.**
+  - `summary` cuenta los problemas por regla y por severidad. `inspected` dice cuántos textos de cada tipo se revisaron y de qué secciones.
+  - `issues` sale en orden de documento, paginado con `cursor`/`limit` (50 por defecto, hasta 200). El cursor queda atado al curso, a los filtros y al `limit`.
+  - La envoltura es la de siempre: `source` con las funciones realmente llamadas, `coverage` con `detail.scope` y `detail.omitted`, `warnings` y `content_policy`.
+  - Si no se puede leer el contenido de las páginas, la cobertura queda parcial con el motivo; no se presenta como «sin problemas». Si lo pedido era sólo esa página, el error es la respuesta. `AUTH_REQUIRED` y `NETWORK_ERROR` siempre se propagan.
+- **Verificación de enlaces (`check_links`, por defecto false).**
+  - Hasta 30 enlaces http(s) distintos por llamada, de a 4. Plazos: 5 s por pedido, 10 s por enlace y 25 s en total, para que entre en la invocación remota. Lo que no llega queda `no_verificado` con el motivo. Corre sólo en la primera página del resultado (sin cursor) y sale en `link_checks`, fuera de la lista paginada.
+  - Pide HEAD y, si la respuesta no es 2xx/3xx o falla la red, GET, cuyo cuerpo se descarta. Si HEAD agotó el plazo, no se reintenta con GET.
+  - `roto` sólo con 404 o 410. Con 401/403, 429, 5xx, sin respuesta o con plazo agotado, el enlace queda `no_verificado`, no roto.
+  - Salvaguardas: las de las descargas de ChatGPT (ADR-129), con `isPublicAddress` y `defaultResolve` exportados de `chat-files.ts`, más http.
+    - Todas las direcciones que resuelve el nombre tienen que ser públicas.
+    - No se pide un enlace con usuario o contraseña, con parámetros de acceso (`wstoken`, `token`, `privatetoken`, `sesskey`) ni con puertos distintos de 80/443.
+    - Las redirecciones no se siguen solas (`redirect: manual`): cada destino pasa los mismos controles, hasta tres saltos.
+  - Los pedidos usan un `fetch` propio, nunca el transporte de Moodle. Salen sin cookies, sin token y con `credentials: omit`.
+  - **El Campus no se pide:** sus enlaces (el host del sitio o un subdominio), también como destino de una redirección, quedan `no_verificado` con «requiere sesión».
+  - El `fetch` y el DNS se inyectan (`AppDeps.linkCheck`, `ServiceDeps.linkCheck`) para los tests.
+
+**Límites:**
+- Es heurística. No juzga si un texto alternativo describe bien la imagen ni si un texto vago se entiende por el contexto.
+- El contraste ignora el tema, las clases CSS, las hojas de estilo y las imágenes de fondo. El fondo blanco es un supuesto y se dice en la evidencia.
+- No revisa libros, lecciones, glosarios, wikis, foros ni consignas de tareas fuera de su descripción. Tampoco el resumen del curso.
+- El HTML es el que devuelve el servicio, ya filtrado y con las URLs reescritas, no el guardado.
+- Entre la resolución DNS y el pedido hay una ventana (rebinding) que no se cierra: la misma limitación que la descarga de ChatGPT.
+- No corrige: las correcciones van por `campus_plan_edit_activity_text`, `campus_plan_patch_section_summary` o el editor del Campus.
+
+**Tests:**
+- `content-issues.test.ts` (unit, 13):
+  - Imágenes: decorativa marcada, `aria-label`, nombre de archivo y evidencia sin token.
+  - Tablas: encabezados, `<thead>`, tabla de diseño y tabla vacía.
+  - Enlaces: textos vagos en los dos idiomas, sin texto, URL como texto sin secretos y pestaña nueva.
+  - Contraste: colores CSS, relación WCAG, umbral de texto grande, fondo en línea, `<font color>`, fondo con imagen y texto propio.
+  - Encabezados, mayúsculas, párrafos vacíos, y evidencia de texto de hasta 120 caracteres.
+  - Enlaces sin red:
+    - estados 200/404/410/405→GET/403/503 y sin respuesta;
+    - SSRF: loopback, metadatos, IPv6 local, DNS privado o mixto, credenciales, puerto, parámetro de acceso, el Campus y sus subdominios, sin pedir nada;
+    - redirecciones a privada y al Campus, y bucle;
+    - plazos;
+    - tope de 30 y concurrencia de 4.
+- `content-issues.test.ts` (integración, 6):
+  - Recorrido completo en orden: resúmenes, etiqueta, descripción, página y subsección, con totales, `wsfunctions`, cobertura y avisos; sin contenido de otro curso y sólo funciones de lectura.
+  - Filtros y rechazos (sección inexistente, cmid ajeno o fuera de la sección, curso fuera del alcance).
+  - Paginado con cursor atado a los filtros.
+  - Páginas ilegibles: cobertura parcial, o error si eran lo pedido.
+  - `check_links` sin token y sin pedir al Campus, y no repetido con cursor.
+  - Por MCP: anotaciones, esquema y denegación.
+
+## ADR-140 · Vista previa de cambios de texto enriquecido
+
+**Fecha:** 2026-11-17 · **Estatus:** adoptada · **Origen:** el dueño. Para juzgar un plan que cambia texto enriquecido (un resumen de sección, una descripción, una etiqueta), el docente tenía que leer el HTML de `payload_preview`. Una tabla, un recuadro o una imagen perdida no se notan en el HTML a simple vista.
+
+**Decisión:**
+- **Herramienta nueva, `campus_get_plan_preview(plan_id)`**, en el servidor de escritura y en el completo (es común, como `campus_get_plan`).
+  - Lee el plan guardado (con la verificación de hash y firma de `campus_get_plan`) y devuelve dos imágenes PNG por texto, rotuladas ANTES y DESPUÉS, más un JSON con origen, momento, cobertura, tamaños y advertencias.
+  - Es de sólo lectura: no escribe ni consulta el Campus.
+- **Extractores por intención** (`src/write/plan-preview.ts`, tabla `PREVIEW_EXTRACTORS`):
+  - `section_summary`: `payload_preview.{before_html, after_html}`.
+  - `patch_section_summary`: `items[].expected.{prior_html, html}`.
+  - `edit_activity_text`: `description`, `text` y `content`, cada uno con `{before_html, after_html}`.
+  - Sólo «después», al crear: `create_content` (página o etiqueta), la consigna de `create_assignment`, `create_quiz` y `create_attendance`, y el mensaje de `announcement` y `forum_reply`.
+  - Antes y después: `post_edit`, `book_chapter`, `lesson_page` y `wiki_page`.
+  - **Genérico** para una intención sin fila: primero `items[].expected.{prior_html, html}`; si no, `payload_preview.{before_html, after_html}`, `payload_preview.<clave>.{before_html, after_html}` y `payload_preview.before/after.<x>_html`. Las intenciones nuevas que editen HTML en el lugar quedan cubiertas si su ítem trae `prior_html` y `html`; si no, se agrega una fila a la tabla.
+  - Un plan sin texto enriquecido da `UNSUPPORTED_CONTENT` («No hay vista previa para este plan»), nunca un resultado vacío.
+  - Hasta 3 textos por llamada (6 imágenes); el resto se lista en las advertencias.
+- **Dibujo sólo local, con Chrome o Edge** (`src/documents/render.ts`, junto a LibreOffice y pdftoppm del ADR-112):
+  - Se busca `CAMPUS_CHROME_PATH`; después las rutas habituales de Windows (`chrome.exe` y `msedge.exe` en Archivos de programa, Archivos de programa (x86) y `%LOCALAPPDATA%`), de macOS y de Linux; por último, el PATH.
+  - Sin navegador: `UNSUPPORTED_CONTENT` con la variable que hay que definir.
+  - En remoto (Vercel), `UNSUPPORTED_CONTENT` antes de leer el plan: allí no hay navegador. El agente revisa `payload_preview` con `campus_get_plan`.
+- **El HTML es dato no confiable.** Tres barreras independientes:
+  - **Saneamiento** (parse5): se quitan scripts, `noscript`, estilos propios, `link`, `meta` (un `refresh` navegaría), `base`, plantillas y comentarios; también los atributos `on*` y los que cargan algo (`src`, `srcset`, `background`, `poster`, `action`, `formaction`, `href` de `<image>`/`<use>` en SVG). Las imágenes que no son `data:` (`@@PLUGINFILE@@`, `pluginfile.php`, externas) quedan como recuadros con nombre de archivo y `alt`. Los `iframe`, video, audio y objetos (H5P, YouTube) quedan como recuadros con su dominio.
+  - **CSP en la página**, antes de todo: `default-src 'none'; img-src data:; script-src 'none'`, estilos propios sólo por nonce (`style-src-elem`) y atributos `style` del contenido permitidos (`style-src-attr 'unsafe-inline'`); sin marcos, fuentes, medios, conexiones ni formularios. No se admite `img-src https:`: cargar imágenes del Campus exigiría red y sesión.
+  - **Navegador aislado:** `--headless=new`, perfil temporal propio (`--user-data-dir`), sin extensiones, sin sincronización ni red de fondo, `--host-resolver-rules=MAP * ~NOTFOUND` y un proxy inexistente (`127.0.0.1:9`), que también corta las direcciones IP y el loopback. El sandbox de Chrome queda activo (sin `--no-sandbox`).
+  - El HTML, el perfil y la captura van a una carpeta temporal (`campus-vista-*`) que se borra al terminar, con reintentos porque Windows tarda en soltar el perfil. Si no se pudo borrar, el resultado lo advierte.
+- **Ajuste:** se descartó `--blink-settings=scriptEnabled=false`, porque con él Chrome 157 no guarda la captura en `--headless=new`. JavaScript queda bloqueado por la CSP y por el saneamiento. Un test real lo comprueba: sin la CSP, el script de prueba pinta la página de rojo; con ella, no hay ningún píxel rojo.
+- **Página y estilo:** hoja mínima tipo Boost (Bootstrap 4) incrustada: tipografía, encabezados, enlaces, `.table`, `.table-bordered`, `.table-striped`, `.generaltable`, `.alert-*`, `.card`, `.btn-*`, `.badge-*` y algunas utilidades. Contenido de hasta 820 px sobre fondo claro, con un rótulo ANTES (gris) o DESPUÉS (verde) dentro de la imagen.
+- **Tamaño:** ventana de 900 × 2400 px. Una franja final de color exacto marca dónde termina la página; la captura se recorta allí con un decodificador PNG propio (`src/documents/png.ts`, sin dependencias nuevas). Si la franja no aparece, el texto supera los 2400 px: la imagen queda cortada, con advertencia y `coverage.complete: false`.
+
+**Límites:**
+- Es una aproximación: sin el tema real del Campus, sus fuentes ni sus filtros (MathJax, multimedia, H5P, enlaces automáticos). Sirve para juzgar estructura y formato, no el píxel exacto.
+- Las imágenes del Campus no se ven: son recuadros. Sólo se dibujan las incrustadas como `data:`.
+- Lo que depende de JavaScript no aparece. Un contenido muy ancho se recorta a 820 px sin aviso.
+- El «antes» es el HTML que guardó el plan, no una relectura del Campus en el momento de la vista previa.
+- El contenido con estilos en línea puede tapar el rótulo o imitar la franja final: sólo afecta su propia imagen.
+
+**Tests:**
+- `plan-preview.test.ts` (unitario, 18): extractores (`section_summary`, `patch_section_summary`, `edit_activity_text`, `create_content`, `post_edit` sin cambios, intención sin fila por el genérico, plan sin texto enriquecido); saneamiento (scripts, `on*`, `meta refresh`, estilos, `link`, `@@PLUGINFILE@@` y `pluginfile.php` como recuadros, `data:` conservada, iframe, SVG, formularios); CSP antes del estilo, nonce y rótulo escapado; PNG (ida y vuelta, los cinco filtros, franja y recorte); búsqueda de Chrome y Edge (variable de entorno, rutas de Windows, macOS y Linux); invocación con un `spawn` falso (argumentos, perfil temporal, carpeta borrada, errores); `planPreview` con un renderer falso (rótulos, recorte, corte a 2400 px, sin navegador).
+- `plan-preview.test.ts` (integración, 5): plan real de `patch_section_summary` contra el Moodle sintético, por MCP, con un renderer falso (bloques texto e imagen, `@@PLUGINFILE@@` saneado, «después» con el cambio, sin POST); remoto (`UNSUPPORTED_CONTENT` sin dibujar); plan sin texto, sin navegador y plan inexistente. Dos tests con el Chrome o Edge local, que se omiten si no hay navegador: dibujo real (ancho ≤ 1200, recortado al contenido; `CAMPUS_PREVIEW_OUT` guarda los PNG) y HTML hostil sin sanear contra un servidor local (ningún píxel rojo, ningún pedido).
+- Prueba real local (Windows 11, Chrome en `C:\Program Files\Google\Chrome\Application\chrome.exe`): 2 PNG de 900 × 312 px para el parche de la tabla de horarios; la celda pasa de «Martes (extraordinario)» a «Miércoles» y el ícono es un recuadro. No quedaron carpetas `campus-vista-*`.

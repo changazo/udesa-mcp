@@ -1,18 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { toPublicError } from "../errors.js";
+import { CampusError, toPublicError } from "../errors.js";
 import type { Logger } from "../util/logger.js";
 import { fileParamsMeta, publishOpenAiFileSchemas } from "./chat-files.js";
 import { ElicitationConfirmer, type Confirmer } from "./confirm.js";
 import { resultError, type WriteEngine } from "./engine.js";
 import type { WriteIntent } from "./intent.js";
+import { defaultHtmlRenderer, planPreview, REMOTE_UNAVAILABLE, type PreviewBlock } from "./plan-preview.js";
+import type { HtmlRenderer } from "../documents/render.js";
 
 export const WRITE_PRODUCT_NAME = "udesa-campus-mcp-escritura";
 export const WRITE_PRODUCT_VERSION = "0.1.0";
 
 /** Herramientas comunes del servidor de escritura (directiva §6.1). Las de plan dependen de las intenciones. */
-export const WRITE_COMMON_TOOLS = ["campus_execute_plan", "campus_get_plan", "campus_list_write_actions", "campus_undo_action", "campus_get_write_status"] as const;
+export const WRITE_COMMON_TOOLS = ["campus_execute_plan", "campus_get_plan", "campus_list_write_actions", "campus_undo_action", "campus_get_write_status", "campus_get_plan_preview"] as const;
 
 export const WRITE_INSTRUCTIONS = `MCP de ESCRITURA del Campus Virtual (Moodle). Separado del servidor de lectura (udesa-campus).
 - Toda escritura tiene cuatro pasos: campus_plan_<intención> arma el plan (no escribe) → campus_execute_plan(plan_id) → confirmación humana según el riesgo → verificación por relectura.
@@ -39,6 +41,8 @@ export interface WriteServerDeps {
     logger: Logger;
     /** local | remoto (W5). */
     mode: "local" | "remoto";
+    /** Vista previa de planes (ADR-140): Chrome/Edge local. Sin definir, se busca en el sistema; null, no hay. */
+    htmlRenderer?: HtmlRenderer | null;
 }
 
 export function createWriteServer(deps: WriteServerDeps): McpServer {
@@ -118,6 +122,27 @@ export function registerWriteTools(server: McpServer, deps: WriteServerDeps): Mc
             annotations: ReadOnly,
         },
         ({ plan_id }) => run("campus_get_plan", () => deps.engine.getPlan(plan_id)),
+    );
+
+    server.registerTool(
+        "campus_get_plan_preview",
+        {
+            title: "Vista previa de un cambio de texto",
+            description:
+                "Sólo servidor local. Dibuja como IMÁGENES (PNG) el texto enriquecido de antes y de después de un plan guardado (resumen de sección, descripción o contenido de una actividad, texto de etiqueta, mensaje, página o capítulo…), para que el docente juzgue el cambio sin leer HTML. No escribe ni consulta el Campus. Aproximación con estilo tipo Boost, sin scripts ni red: las imágenes que no estén incrustadas y los iframes se ven como recuadros. Si el plan no cambia texto enriquecido, error UNSUPPORTED_CONTENT.",
+            inputSchema: { plan_id: PlanId },
+            annotations: { ...ReadOnly, openWorldHint: false },
+        },
+        async ({ plan_id }) => {
+            let blocks: PreviewBlock[] = [];
+            const r = await run("campus_get_plan_preview", async () => {
+                if (deps.mode === "remoto") throw new CampusError("UNSUPPORTED_CONTENT", REMOTE_UNAVAILABLE);
+                const p = await planPreview(await deps.engine.getPlan(plan_id), deps.htmlRenderer === undefined ? defaultHtmlRenderer() : deps.htmlRenderer);
+                blocks = p.blocks;
+                return p.result;
+            });
+            return "isError" in r ? r : { content: [...r.content, ...blocks] };
+        },
     );
 
     server.registerTool(

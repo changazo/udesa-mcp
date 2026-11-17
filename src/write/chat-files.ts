@@ -101,7 +101,7 @@ export function isPublicAddress(ip: string): boolean {
     return false;
 }
 
-const defaultResolve = async (host: string) => (await lookup(host, { all: true, verbatim: true })).map((r) => r.address);
+export const defaultResolve = async (host: string) => (await lookup(host, { all: true, verbatim: true })).map((r) => r.address);
 
 async function assertPublicUrl(raw: string, resolve: (h: string) => Promise<string[]>): Promise<URL> {
     let u: URL;
