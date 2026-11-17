@@ -83,9 +83,12 @@ function csvRow(e: Ev, lang: keyof typeof LANG): string {
     const actor = e.actor ?? P;
     const cm = e.cm ?? ASSIGN_CMID;
     const rel = e.related !== undefined ? ` for the user with id '${e.related}'` : "";
+    // Como Moodle: «has submitted», la carga de archivos y el texto nunca llevan «for the user with id»; el usuario
+    // afectado de esas filas es el autor de la entrega (relateduserid), salvo que el caso indique otro.
+    const own = ["envio", "texto", "archivo", "creado_texto", "editado_texto", "registro"].includes(e.k);
     const [comp, name, desc] = (
         {
-            envio: [L.assign, L.ev.envio, `The user with id '${actor}' has submitted the submission with id '101'${rel} for the assignment with course module id '${cm}'.`],
+            envio: [L.assign, L.ev.envio, `The user with id '${actor}' has submitted the submission with id '101' for the assignment with course module id '${cm}'.`],
             texto: [L.text, L.ev.texto, `The user with id '${actor}' has saved an online text with id '101' in the assignment activity with course module id '${cm}'.`],
             archivo: [L.file, L.ev.archivo, `The user with id '${actor}' has uploaded a file to the submission with id '101' in the assignment activity with course module id '${cm}'.`],
             creado_texto: [L.text, L.ev.creado, `The user with id '${actor}' created an online text submission with '3' words in the assignment with course module id '${cm}'.`],
@@ -102,7 +105,7 @@ function csvRow(e: Ev, lang: keyof typeof LANG): string {
     const [y, mo, d] = date.split("-");
     const timeText = `${d}/${mo}/${y!.slice(2)}, ${e.noSeconds ? time.slice(0, 5) : time}`;
     const q = (s: string) => `"${s.replace(/"/g, '""')}"`;
-    return [q(timeText), NAMES[actor] ?? "Otra Persona", e.affected ?? "-", q("Tarea: TP1 sintético"), q(comp), q(name), q(desc), "web", "10.9.8.7"].join(",");
+    return [q(timeText), NAMES[actor] ?? "Otra Persona", e.affected ?? (own ? (NAMES[actor] ?? "Otra Persona") : "-"), q("Tarea: TP1 sintético"), q(comp), q(name), q(desc), "web", "10.9.8.7"].join(",");
 }
 
 /** Sirve report/log como el Campus: con `user` filtra por actor; orden descendente por defecto. */
@@ -344,11 +347,25 @@ describe("atribución", () => {
         expect(r.data.timing.observed_difference!.min_seconds).toBe(ba("2026-09-21 10:00:00") - DUE);
     });
 
-    it("envío delegado con ID explícito del participante cuenta, marcando al operador", async () => {
-        const evs: Ev[] = [CREATED, { t: "2026-09-20 23:00:00", k: "envio", actor: TEACHER, related: P, affected: "Ana Sintética" }];
+    it("envío hecho por un docente: Moodle no pone el ID del participante en la descripción, así que no se atribuye", async () => {
+        const evs: Ev[] = [CREATED, { t: "2026-09-20 23:00:00", k: "envio", actor: TEACHER, affected: "Ana Sintética" }];
         const r = await history(await setup(evs, { due: DUE, anchor: ba("2026-09-20 23:00:00") }));
-        expect(r.data.first_submission_observed).toMatchObject({ download: "actividad", attribution: { operator: "otro_usuario", operator_user_id: TEACHER } });
-        expect(r.data.timing.result).toBe("on_time");
+        expect(r.data.first_submission_observed).toBeNull();
+        expect(r.data.summary).toMatchObject({ non_attributable_candidates: 1 });
+        expect(r.data.timing.result).toBe("unknown");
+    });
+
+    it("envíos normales de otros alumnos antes del primer envío (con su nombre como usuario afectado) no impiden «late»", async () => {
+        const evs: Ev[] = [
+            CREATED,
+            { t: "2026-09-20 18:00:00", k: "texto", actor: STUDENT_B },
+            { t: "2026-09-20 18:00:05", k: "envio", actor: STUDENT_B },
+            { t: "2026-09-21 01:00:00", k: "texto" },
+            { t: "2026-09-21 01:00:03", k: "envio" },
+        ];
+        const r = await history(await setup(evs, { due: DUE, anchor: ba("2026-09-21 01:00:03") }));
+        expect(r.data.summary).toMatchObject({ non_attributable_candidates: 0, other_participants_events_ignored: 2 });
+        expect(r.data.timing.result).toBe("late");
     });
 
     it("evento propio que la descripción ubica en otra tarea: inconsistente, no se usa", async () => {

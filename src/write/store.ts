@@ -1,4 +1,5 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { CampusError } from "../errors.js";
 import { redact } from "../util/redact.js";
@@ -241,10 +242,13 @@ export class FileWriteStore implements WriteStore {
      */
     async updateState(fn: (s: WriteSwitchState) => WriteSwitchState | null) {
         const lock = join(this.location, "write-state.lock");
+        const owner = randomUUID();
         mkdirSync(this.location, { recursive: true });
         for (let i = 0; ; i++) {
             try {
-                closeSync(openSync(lock, "wx", 0o600));
+                const fd = openSync(lock, "wx", 0o600);
+                writeFileSync(fd, owner);
+                closeSync(fd);
                 break;
             } catch {
                 let stale = false;
@@ -253,8 +257,16 @@ export class FileWriteStore implements WriteStore {
                 } catch {
                     /* lo soltaron recién */
                 }
-                if (stale) rmSync(lock, { force: true });
-                else if (i > 500) throw new CampusError("SERVICE_UNAVAILABLE", "El estado de escrituras está tomado por otro proceso.");
+                if (stale) {
+                    // Un solo proceso gana el renombre del candado abandonado; los demás vuelven a intentar.
+                    const grave = `${lock}.${owner}.stale`;
+                    try {
+                        renameSync(lock, grave);
+                        rmSync(grave, { force: true });
+                    } catch {
+                        /* otro lo tomó primero */
+                    }
+                } else if (i > 500) throw new CampusError("SERVICE_UNAVAILABLE", "El estado de escrituras está tomado por otro proceso.");
                 else await new Promise((r) => setTimeout(r, 10));
             }
         }
@@ -264,7 +276,12 @@ export class FileWriteStore implements WriteStore {
             if (next) this.writeAtomic(this.stateFile, JSON.stringify(next, null, 2));
             return { before, after: next ?? before, changed: !!next };
         } finally {
-            rmSync(lock, { force: true });
+            // Sólo se borra el candado propio (si otro lo tomó por abandonado, no se le borra el suyo).
+            try {
+                if (readFileSync(lock, "utf8") === owner) rmSync(lock, { force: true });
+            } catch {
+                /* ya no está */
+            }
         }
     }
 

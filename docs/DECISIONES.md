@@ -2309,7 +2309,7 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
   - `resume` sólo libera el freno. No toca `disabled`, los contadores del día, la configuración ni la auditoría.
 - **Fallos por objetivo y sistémicos.** Cada fallo deja una huella sin contenido: intención, curso, objetivo, etapa, código, HTTP y sha256 de los archivos.
   - El umbral cuenta huellas **distintas** dentro de una ventana de 15 minutos. Repetir el mismo intento fallido cuenta una vez.
-  - Los códigos de infraestructura (`AUTH_REQUIRED`, `SERVICE_UNAVAILABLE`, `NETWORK_ERROR`, `RATE_LIMITED`) son sistémicos y cuentan siempre.
+  - Los códigos de infraestructura (`AUTH_REQUIRED`, `SERVICE_UNAVAILABLE`, `NETWORK_ERROR`, `RATE_LIMITED`) son sistémicos y cuentan siempre, también cuando el resultado es `aplicado_desconocido` (si no, un Campus caído nunca frenaría).
   - Un éxito vacía el historial.
   - No cuentan los errores previos a emitir: plan obsoleto o vencido, confirmación, política, validación y token rechazado antes de escribir.
 - **Subida rechazada.** Un 4xx de `webservice/upload.php` devuelve `MOODLE_REJECTED` con `stage: upload_draft` y `http_status`. El mensaje sugiere regenerar el PDF y armar un plan nuevo. No se vuelca el cuerpo HTML ni se reintenta, y el archivo nunca se convierte.
@@ -2327,7 +2327,17 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
   - `campus_get_write_status` suma `state`, `paused_until`, `retry_after_seconds`, `probe_in_progress`, ventana, cooldown, último fallo y última recuperación.
 - **Auditoría** de transiciones: `brake_engaged`, `brake_half_open`, `brake_recovered`, `brake_reengaged`, `brake_resumed_manually` y `brake_resume_noop`.
 
+**Revisión adversarial (16 nov):** se corrigieron:
+- inciertos sistémicos que no sumaban;
+- un error al soltar el turno que podía tapar el resultado de una escritura ya hecha;
+- una prueba interrumpida después de escribir que se soltaba sin veredicto (ahora reabre la pausa);
+- un candado local sin dueño;
+- un 401 de la subida contado como fallo del archivo (ahora `AUTH_REQUIRED`, el plan sigue disponible);
+- rechazos locales previos al envío que contaban;
+- la auditoría de `resume` sin freno.
+
 **Límites:**
+- Sin barrera atómica entre la verificación y el envío: si otra instancia abre el freno o apaga el interruptor justo después de que una ejecución pasó la barrera, esa ejecución igual escribe. El freno bloquea lo que llega después.
 - La huella de un fallo de verificación (`sin_efecto`) no distingue causas dentro del mismo objetivo.
 - El lease de 15 minutos supone que una ejecución termina antes. Si se interrumpe, la siguiente prueba espera a que venza.
 
@@ -2345,7 +2355,7 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
   - **Del participante:** `modid` + `user`, el filtro nativo por actor.
   - **De la actividad:** sólo `modid`.
   - Las dos con `modaction=cud` y sin fecha, o sea con todo lo que el Campus conserva.
-- **Atribución sólo por ID.** Los eventos de la descarga del participante cuentan si la descripción (Moodle la escribe en inglés y con IDs) no la contradice. Si nombra otro actor, otro usuario afectado u otra actividad, el evento es inconsistente y no se usa. Una acción de otra persona cuenta como delegada sólo si la descripción trae `for the user with id '<participante>'`, y se marca `operator: otro_usuario` con su ID. Una acción ajena sobre alguien no identificable por ID, como un docente que envía por un alumno (Moodle no pone el ID en esa descripción), queda **no atribuible**: nunca es el primer envío y bloquea `late`. Las acciones propias de otros participantes se ignoran y se cuentan. Nunca se compara por nombre visible.
+- **Atribución sólo por ID.** Los eventos de la descarga del participante cuentan si la descripción (Moodle la escribe en inglés y con IDs) no la contradice. Si nombra otro actor, otro usuario afectado u otra actividad, el evento es inconsistente y no se usa. Una acción de otra persona cuenta como delegada sólo si la descripción trae `for the user with id '<participante>'`, y se marca `operator: otro_usuario` con su ID. Una acción ajena sobre alguien no identificable por ID, como un docente que envía por un alumno (Moodle no pone el ID en esa descripción), queda **no atribuible**: nunca es el primer envío y bloquea `late`. Las acciones propias de otros participantes se ignoran y se cuentan. Moodle pone al autor como usuario afectado de sus propios envíos y guardados: una fila con actor = usuario afectado (comparando dos columnas de la misma fila, nunca con el nombre del participante) y descripción sin «for the user with id» es propia de esa otra persona. Nunca se compara por nombre visible.
 - **Tabla de etiquetas exactas.** El par componente + evento se compara en español e inglés, tras normalizar espacios repetidos, NFC y un punto final. Clases:
   - `envio`.
   - Guardados de contenido: `carga_archivo`, `guardado_texto`, `creacion_contenido` y `actualizacion_contenido`.

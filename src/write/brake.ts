@@ -114,7 +114,8 @@ export type BrakeTransition = "brake_engaged" | "brake_recovered" | "brake_reeng
  */
 export function recordResult(s: WriteSwitchState, now: Date, cfg: BrakeConfig, status: ExecutionStatus, failure: FailureInfo | null, probeId: string | null): { state: WriteSwitchState; transition: BrakeTransition } {
     const at = now.toISOString();
-    const failed = status === "sin_efecto" || status === "rechazado_por_moodle";
+    // Incierto por una falla sistémica (red, servicio caído): también suma, si no un Campus caído nunca frenaría.
+    const failed = status === "sin_efecto" || status === "rechazado_por_moodle" || (status === "aplicado_desconocido" && failure?.scope === "systemic");
     let next: WriteSwitchState = { ...s };
     if (failure && (failed || status === "aplicado_desconocido")) next.last_failure = { at, scope: failure.scope, stage: failure.stage, code: failure.code, http_status: failure.http_status };
     if (probeId) {

@@ -76,6 +76,11 @@ export class WriteTransport {
             } catch {
                 throw new CampusError("NETWORK_ERROR", "No se pudieron subir los adjuntos (falla de red). No se publicó nada; si algo llegó, queda en tu borrador privado y Moodle lo purga a los 4 días.");
             }
+            if (res.status === 401) {
+                await res.body?.cancel().catch(() => undefined);
+                this.opts.tokenSource.reportRejected(token);
+                throw new CampusError("AUTH_REQUIRED", "Moodle rechazó el token al subir los archivos (HTTP 401); no se publicó nada.", { details: { stage: "upload_draft", http_status: 401 } });
+            }
             // ADR-134: un rechazo HTTP de la subida identifica etapa y estado, sin volcar el cuerpo (HTML del Campus).
             if (res.status >= 400 && res.status < 500 && res.status !== 401) {
                 await res.body?.cancel().catch(() => undefined);

@@ -42,6 +42,9 @@ const MAX_CHAT_FILE_BYTES = 50 * 1024 * 1024;
 /** Umbral por defecto del freno (ADR-134: ahora en write_policy.brake). */
 export const BRAKE_THRESHOLD = DEFAULT_BRAKE.failure_threshold;
 
+/** Rechazos locales, antes de que la llamada salga hacia Moodle: no son fallos de escritura para el freno. */
+const PRE_SEND_CODES = new Set(["POLICY_DENIED", "WRITE_NOT_ALLOWED", "UNSUPPORTED_CONTENT", "RESOURCE_OUT_OF_SCOPE", "CONFIG_INVALID", "PLAN_STALE"]);
+
 /** Códigos que no dependen del objetivo: cada uno cuenta como un fallo distinto para el freno. */
 const SYSTEMIC_CODES = new Set(["AUTH_REQUIRED", "SERVICE_UNAVAILABLE", "NETWORK_ERROR", "RATE_LIMITED", "INTERNAL"]);
 
@@ -205,7 +208,7 @@ export class WriteEngine {
     async resume(via: string, by: string | null = null) {
         const { before, after, changed } = await this.deps.store.updateState((s) => (s.paused || s.probe || s.failures.length ? resumeBrake(this.rollover(s), this.now(), via) : null));
         const prior = brakeView(before, this.now(), this.brakeCfg);
-        await this.audit({ event: changed ? "brake_resumed_manually" : "brake_resume_noop", via, by, prior_state: prior.state, prior_paused_until: prior.paused_until, prior_failures_in_window: prior.failures_in_window, disabled: after.disabled });
+        await this.audit({ event: changed && before.paused ? "brake_resumed_manually" : "brake_resume_noop", via, by, prior_state: prior.state, prior_paused_until: prior.paused_until, prior_failures_in_window: prior.failures_in_window, disabled: after.disabled });
         return { result: !before.paused ? ("no_brake" as const) : ("resumed" as const), disabled: after.disabled, state: after };
     }
 
@@ -523,12 +526,24 @@ export class WriteEngine {
         await this.deps.read.session.verify();
         // Vencida la pausa del freno, esta ejecución es la prueba: el turno se toma de forma atómica.
         const probeId = await this.takeProbe();
-        let recorded = false;
+        const progress = { recorded: false, dispatched: false };
         try {
-            return await this.run(sp, intent, confirmation, client, probeId, () => (recorded = true));
+            return await this.run(sp, intent, confirmation, client, probeId, progress);
         } finally {
-            // Sin resultado registrado no se emitió nada (o se cortó antes): el turno se suelta sin veredicto.
-            if (probeId && !recorded) await this.deps.store.updateState((s) => (s.probe?.id === probeId ? releaseProbe(s, probeId) : null));
+            if (probeId && !progress.recorded) {
+                // Nada emitido: el turno se suelta sin veredicto. Ya emitido pero sin resultado registrado (se cortó
+                // después de escribir): es una prueba incierta y reabre el cooldown (ADR-134, conservador).
+                // Un fallo acá sólo se registra: nunca tapa el resultado ni el error de la ejecución.
+                try {
+                    const now = this.now();
+                    const { changed } = await this.deps.store.updateState((s) =>
+                        s.probe?.id !== probeId ? null : progress.dispatched ? recordResult(s, now, this.brakeCfg, "aplicado_desconocido", null, probeId).state : releaseProbe(s, probeId),
+                    );
+                    if (changed && progress.dispatched) await this.audit({ event: "brake_reengaged", probe_id: probeId, status: "interrumpida_tras_escribir" });
+                } catch (e) {
+                    this.deps.logger.log("error", "brake_probe_release_failed", { code: toPublicError(e).code });
+                }
+            }
         }
     }
 
@@ -547,7 +562,7 @@ export class WriteEngine {
         throw new CampusError("WRITE_DISABLED", "No se pudo tomar el turno de prueba del freno. No se escribió nada.", { details: { reason: "probe_in_progress", brake: true, probe_in_progress: true, retry_after_seconds: 60 } });
     }
 
-    private async run(sp: StoredPlan, intent: WriteIntent<any>, confirmation: { channel: string; at: string }, client: string, probeId: string | null, onRecorded: () => void): Promise<ExecutionResult> {
+    private async run(sp: StoredPlan, intent: WriteIntent<any>, confirmation: { channel: string; at: string }, client: string, probeId: string | null, progress: { recorded: boolean; dispatched: boolean }): Promise<ExecutionResult> {
         const plan = sp.plan;
         const planId = plan.plan_id;
         if (!(await this.deps.store.claim(planId, this.now().toISOString()))) {
@@ -606,6 +621,7 @@ export class WriteEngine {
                 continue;
             }
             functions.push(callLabel(item));
+            progress.dispatched = true;
             if (item.counts_as_message) messages++;
             try {
                 const data = await this.dispatch(item);
@@ -642,6 +658,7 @@ export class WriteEngine {
 
         // Token rechazado antes de aplicar nada: el plan sigue disponible tras renovar la sesión.
         if (authError && items.every((i) => i.outcome === "no_ejecutado" || i.error?.code === "AUTH_REQUIRED")) {
+            progress.dispatched = false; // nada se aplicó: el turno de prueba se suelta sin veredicto
             await this.setState(planId, { status: "pendiente", updated_at: this.now().toISOString(), note: "Token rechazado antes de escribir." });
             await this.deps.store.release(planId);
             throw authError;
@@ -702,8 +719,13 @@ export class WriteEngine {
         }
         // La escritura ya se emitió: si el almacén falla al registrar el freno, el resultado no se pierde (queda el aviso).
         try {
-            const brake = await this.recordOutcome(status, functions.length, messages, failureOf(plan, finalItems, status), probeId);
-            onRecorded();
+            const notSent = finalItems.every((r) => r.outcome === "no_ejecutado" || (r.outcome === "rechazado" && PRE_SEND_CODES.has(r.error?.code ?? "")));
+        if (notSent && probeId) {
+            await this.deps.store.updateState((s) => (s.probe?.id === probeId ? releaseProbe(s, probeId) : null));
+            progress.recorded = true;
+        }
+        const brake = await this.recordOutcome(status, functions.length, messages, notSent ? null : failureOf(plan, finalItems, status), notSent ? null : probeId);
+            progress.recorded = true;
             if (brake) warnings.push(brake);
         } catch (e) {
             this.deps.logger.log("error", "brake_record_failed", { code: toPublicError(e).code });
@@ -851,7 +873,7 @@ export class WriteEngine {
             profile_id: this.deps.profile.profile_id,
             read_profile: this.deps.profile.read_profile.profile_id,
             site_url: this.deps.profile.read_profile.site_url,
-            enabled: this.policy.enabled && !s.disabled && (bv.state === "closed" || bv.state === "half_open"),
+            enabled: this.policy.enabled && !s.disabled && (bv.state === "closed" || (bv.state === "half_open" && !bv.probe_in_progress)),
             write_policy_enabled: this.policy.enabled,
             switch: { disabled: s.disabled, changed_at: s.changed_at },
             brake: {

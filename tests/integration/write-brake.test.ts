@@ -299,3 +299,33 @@ describe("estado compartido en el KV: transiciones atómicas (ADR-134)", () => {
         await expect(down.updateState((s) => s)).rejects.toMatchObject({ code: "SERVICE_UNAVAILABLE" });
     });
 });
+
+describe("revisión adversarial (ADR-134)", () => {
+    it("resultados inciertos por fallas sistémicas (red) sí suman al freno; un incierto por objetivo no", () => {
+        const now = new Date("2026-11-16T12:00:00Z");
+        let s = { ...EMPTY_STATE };
+        for (let i = 0; i < 3; i++) s = recordResult(s, now, DEFAULT_BRAKE, "aplicado_desconocido", { fingerprint: `red${i}`, scope: "systemic", stage: "ws_call", code: "NETWORK_ERROR", http_status: null }, null).state;
+        expect(brakeView(s, now, DEFAULT_BRAKE).state).toBe("open");
+        let t = { ...EMPTY_STATE };
+        for (let i = 0; i < 3; i++) t = recordResult(t, now, DEFAULT_BRAKE, "aplicado_desconocido", { fingerprint: `obj${i}`, scope: "target", stage: "verify", code: null, http_status: null }, null).state;
+        expect(brakeView(t, now, DEFAULT_BRAKE).state).toBe("closed");
+    });
+
+    it("401 en la subida: AUTH_REQUIRED antes de escribir, el plan sigue disponible y no suma al freno", async () => {
+        const h = await makeWriteHarness({ policy: { courses: { [String(COURSE)]: ["create_content", "synthetic_test"] } } });
+        new SyntheticContent(h.fake, h.w2);
+        h.fake.upload = async () => new Response("no", { status: 401 });
+        const path = join(mkdtempSync(join(tmpdir(), "campus-401-")), "a.pdf");
+        writeFileSync(path, "%PDF-1.4\n");
+        const p = await h.app.engine.plan("create_content", { course_id: COURSE, section: 1, type: "resource", name: "A", file_path: path }, "test");
+        expect((await errOf(exec(h, p.plan_id))).code).toBe("AUTH_REQUIRED");
+        expect((await h.app.engine.status()).brake).toMatchObject({ state: "closed", consecutive_failures: 0, last_failure: null });
+    });
+
+    it("resume sin freno registra brake_resume_noop (no un desbloqueo)", async () => {
+        const h = await makeWriteHarness();
+        expect((await h.app.engine.resume("test")).result).toBe("no_brake");
+        expect(audit(h)).toContain('"event":"brake_resume_noop"');
+        expect(audit(h)).not.toContain('"event":"brake_resumed_manually"');
+    });
+});

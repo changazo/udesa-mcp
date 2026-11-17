@@ -416,8 +416,10 @@ export function buildHistory(input: HistoryInput) {
         if (ids.actor !== null && ids.related === P) {
             delegated++;
             timeline.push(toInternal(e, "actividad", kind, { basis: "descripcion_usuario_afectado", operator: "otro_usuario", operator_user_id: ids.actor }));
-        } else if (ids.actor !== null && ids.related === null && e.affected_user === null) {
-            othersIgnored++; // acción propia de otra persona sobre su entrega
+        } else if (ids.actor !== null && ids.related === null && (e.affected_user === null || e.affected_user === e.actor)) {
+            // Acción propia de otra persona sobre su entrega: Moodle pone al autor como usuario afectado de sus
+            // propios envíos y guardados. Se comparan dos columnas de la MISMA fila, nunca con el nombre del participante.
+            othersIgnored++;
         } else if (ids.related !== null && ids.related !== P) {
             othersIgnored++;
         } else {
