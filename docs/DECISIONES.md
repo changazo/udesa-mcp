@@ -145,6 +145,7 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [133](#adr-133--avisos-en-calificaciones-grupales) | Avisos en calificaciones grupales | implementada; pruebas sintéticas |
 | [134](#adr-134--freno-de-escrituras-con-recuperación-automática) | Freno de escrituras con recuperación automática | adoptada; modifica §5.8 de la directiva de escrituras |
 | [135](#adr-135--historial-de-entregas) | Historial de entregas | adoptada; validación real parcial |
+| [136](#adr-136--edición-conservativa-del-html-del-resumen-de-una-sección) | Edición conservativa del HTML del resumen de una sección | adoptada |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -2412,3 +2413,43 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
   - Tabla de etiquetas y parseo de horas, incluidos los cambios de horario.
 - `reports.test.ts` (1 nuevo): forma del export real (hora con segundos, descripción en inglés con IDs, sin IP). Las pruebas existentes de `kind=logs` cubren la refactorización del lector compartido.
 - `mcp.test.ts` (POL-05): la tool aparece en el catálogo de lectura con nombre `get` y anotaciones de sólo lectura.
+
+## ADR-136 · Edición conservativa del HTML del resumen de una sección
+
+**Fecha:** 2026-11-17 · **Estatus:** adoptada · **Origen:** directiva del dueño. Para cambiar un día en la tabla de horarios del resumen de una sección, `campus_plan_section_summary` reconstruía el resumen desde Markdown. El conversor no conocía tablas: guardaba `<p>| … |</p>`. Tampoco conocía imágenes: una imagen quedaba como «!» más un enlace. Además escapaba el HTML que se le pasara, y aun así la verificación por texto (`comparable`) daba `aplicado_verificado`. Se reprodujo y se restauró en el curso de pruebas.
+
+**Decisión:**
+- **Intención nueva, `patch_section_summary`.** El agente no manda HTML: indica la tabla (encabezados), la fila (columna → texto exacto), la columna, el texto actual y el texto nuevo.
+  - El servidor lee el resumen **tal como está guardado**: el `summary_editor[text]` del formulario `/course/editsection.php`, con las URLs de borrador normalizadas a `@@PLUGINFILE@@` (como los demás editores). No usa la salida de `core_course_get_contents`, que viene filtrada y con las URLs reescritas: reenviarla alteraría lo guardado.
+  - Parsea el HTML con parse5 (dependencia nueva, fijada en 8.0.1, con posiciones en el original), ubica UN nodo de texto y reemplaza sólo ese intervalo del string original. No reserializa el DOM.
+  - Antes de enviar comprueba que la firma estructural del resultado difiera de la original en ese texto y en nada más.
+  - Exige una sola tabla, una sola fila, una sola celda y texto actual exacto. Los encabezados pueden estar en `<td>` sin `<thead>`. Los espacios y el espacio no separable se normalizan sólo para buscar.
+  - Rechaza antes del POST: celdas combinadas, texto repartido en varios nodos y texto nuevo con saltos de línea o caracteres de control. El texto nuevo se escapa como texto.
+  - Formato 1 (HTML) y el resto del formulario se reenvían tal cual. Sin notificaciones.
+- **Precondición:** hash del HTML guardado. Un cambio sólo de `style`, de `href` o de una imagen invalida el plan, aunque el texto visible sea igual.
+- **Verificación estructural:** firma canónica del HTML releído, con elementos, atributos ordenados y textos sin espacios de más; Moodle puede reformatear espacios.
+  - Si coincide con la esperada, `coincide`.
+  - Si no, `aplicado_con_diferencias`, con lo perdido: tablas, filas, celdas, imágenes, enlaces, estilos, clases o textos de celdas.
+- **Deshacer:** el HTML anterior completo, con la misma verificación.
+- **Reemplazo total blindado** (`section_summary`):
+  - Si el resumen actual tiene tablas, imágenes, enlaces, multimedia, estilos o clases que el nuevo no conserva, se rechaza y sugiere el patch.
+  - `allow_structure_loss: true` lo permite como R3, con advertencia. Sólo si el usuario pidió reemplazar todo.
+  - Su verificación suma conteos de estructura (tablas, filas, celdas, imágenes, enlaces, multimedia): el mismo texto sin la tabla ya no es `aplicado_verificado`.
+- **Conversor Markdown:**
+  - Tablas estándar: encabezado, fila separadora con alineación `:---`/`:---:`/`---:` y `\|` como barra literal.
+  - Imágenes `![alt](https://…)`, sólo http(s).
+  - Filas con barras sin la fila separadora se rechazan en vez de quedar como párrafo.
+  - Vale para todos los textos que se escriben en Markdown (foros, descripciones, páginas, capítulos, resúmenes).
+- **Otros editores revisados:**
+  - `edit_activity_text` (descripciones, texto de etiquetas y contenido de páginas) tenía el mismo riesgo de reemplazo total. Recibió el mismo blindaje: rechazo por pérdida de estructura y `allow_structure_loss` como R3.
+  - Los capítulos de libro, las páginas de lección, las preguntas de encuesta y las entradas de glosario o wiki también reemplazan el texto completo y verifican por texto. Quedan cubiertos por el conversor corregido, pero no tienen ni el rechazo por pérdida de estructura ni un patch puntual. Es el siguiente paso si hace falta.
+
+**Límites:**
+- Sólo celdas de tablas en resúmenes de secciones.
+- No se edita texto con formato parcial dentro de la celda, ni tablas con celdas combinadas.
+- El texto de la celda se reemplaza entero. Su envoltorio (`<p>`, `<span style>`) se conserva.
+
+**Tests:**
+- `html-patch.test.ts` (11): celda con `<p><span style>`, tabla con imagen, enlaces, `data-*` y anchos, rechazos (duplicados, ausencias, texto distinto, nodos repartidos, celdas combinadas), escape, encabezados en `<th>` y espacios, precondición por `style` y por `href`, firma ante reformateo, pérdida detectada y conversor (tablas, alineación, barra escapada, rechazo sin separador, imágenes).
+- `write-section-patch.test.ts` (8): plan con una sola modificación, POST con formato 1, `@@PLUGINFILE@@` y el resto del formulario, verificado, deshacer exacto, Moodle que guarda el texto sin la tabla o sin un `style` (con diferencias), precondición obsoleta sin POST, rechazos, y el blindaje del reemplazo total (rechazo, R3 explícito, tabla Markdown como `<table>` y estructura verificada).
+- `write-edit-text.test.ts` (1 nuevo): página con tabla e imagen.

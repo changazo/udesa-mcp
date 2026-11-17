@@ -3,6 +3,7 @@ import { CampusError } from "../../errors.js";
 import { GroupingsSchema, GroupsSchema } from "../../moodle/schemas.js";
 import type { IntentContext, Interpretation, ItemVerification, Presence, WriteIntent } from "../intent.js";
 import type { Difference, Plan, PlanDraft, PlanItem } from "../plan.js";
+import { htmlFeatures, structureLoss } from "../html-patch.js";
 import { comparable, toHtml } from "../text.js";
 import { assertIdnumberEditable } from "./idnumber.js";
 
@@ -50,7 +51,11 @@ async function verify(item: PlanItem, plan: Plan, ctx: IntentContext): Promise<I
     const x = item.expected as Record<string, string>;
     const prior = item.expected.prior as unknown as Record<string, string>;
     let now: Record<string, string>;
-    if (item.call.fn === "course_section_edit") now = { summary_text: comparable((await sectionOf(ctx, plan.course_id, Number(t.section_number))).summary) };
+    if (item.call.fn === "course_section_edit") {
+        const summary = (await sectionOf(ctx, plan.course_id, Number(t.section_number))).summary;
+        // ADR-136: además del texto, la estructura (tablas, filas, celdas, imágenes, enlaces). El mismo texto sin la tabla no es éxito.
+        now = { summary_text: comparable(summary), ...(x.structure !== undefined ? { structure: structureOf(summary ?? "") } : {}) };
+    }
     else {
         const g = await groupOf(ctx, plan.course_id, Number(t.group_id));
         now = { name: g.name ?? "", idnumber: g.idnumber ?? "", description_text: comparable(g.description) };
@@ -70,25 +75,31 @@ const common = { readVersions, interpret, verify, reconcile };
 
 // ---------- resumen de sección ----------
 
-function sectionDraft(courseId: number, s: { id: number; section: number; name: string; summary: string }, html: string, undoOf: string | null): PlanDraft {
+/** Conteos que no dependen de cómo Moodle reformatea el HTML al devolverlo. */
+function structureOf(html: string): string {
+    const f = htmlFeatures(html);
+    return JSON.stringify({ tables: f.tables, rows: f.rows, cells: f.cells, images: f.images.length, links: f.links.length, media: f.media });
+}
+
+function sectionDraft(courseId: number, s: { id: number; section: number; name: string; summary: string }, html: string, undoOf: string | null, lost: string[] = []): PlanDraft {
     return {
         intent: "section_summary",
         capability: "rename_content",
         course_id: courseId,
-        base_risk: "R2",
-        summary: `${undoOf ? "Deshacer: " : ""}Cambiar el resumen de la sección ${s.section} «${s.name}».`,
+        base_risk: lost.length ? "R3" : "R2",
+        summary: `${undoOf ? "Deshacer: " : ""}Cambiar el resumen de la sección ${s.section} «${s.name}»${lost.length ? ` PERDIENDO ${lost.join(", ")}` : ""}.`,
         payload_preview: { section: { id: s.id, number: s.section, name: s.name }, before_html: s.summary, after_html: html },
         side_effects: ["Cambia el texto que los estudiantes ven al principio de la sección. Sin notificaciones."],
         preconditions: { description: "El resumen no cambió desde el plan.", versions: { [`secsummary:${courseId}:${s.section}`]: comparable(s.summary) } },
         undo: { kind: "compensación", how: "Volver al resumen anterior (tal como lo devolvía Moodle).", until: null },
-        warnings: ["Formulario web: requiere la sesión web del Campus."],
+        warnings: ["Formulario web: requiere la sesión web del Campus.", ...(lost.length ? [`Reemplazo destructivo pedido explícitamente (allow_structure_loss): el resumen actual tiene ${lost.join(", ")} que el nuevo no conserva.`] : [])],
         items: [
             {
                 item_id: "i1",
                 description: `Resumen de la sección ${s.section}`,
                 call: { kind: "form", fn: "course_section_edit", params: { query: { id: String(s.id) }, fields: { "summary_editor[text]": html, "summary_editor[format]": "1" } } },
                 target: { course_id: courseId, section_id: s.id, section_number: s.section },
-                expected: { summary_text: comparable(html), prior: { summary_text: comparable(s.summary) } as unknown as string },
+                expected: { summary_text: comparable(html), structure: structureOf(html), prior: { summary_text: comparable(s.summary), structure: structureOf(s.summary) } as unknown as string },
             },
         ],
         prior_state: { summary_html: s.summary },
@@ -101,7 +112,8 @@ function sectionDraft(courseId: number, s: { id: number; section: number; name: 
 const sectionShape = {
     course_id: z.number().int().positive(),
     section_number: z.number().int().min(0).max(200),
-    summary: z.string().max(20_000).describe("Nuevo resumen (Markdown). \"\" lo vacía."),
+    summary: z.string().max(20_000).describe("Nuevo resumen COMPLETO (Markdown, con tablas | a | b | e imágenes ![alt](https://…)). \"\" lo vacía. Para cambiar una celda de una tabla existente, campus_plan_patch_section_summary."),
+    allow_structure_loss: z.boolean().optional().describe("Sólo si el usuario pidió reemplazar TODO el resumen sabiendo que se pierden tablas, imágenes, enlaces o estilos del actual (R3). Nunca para un cambio puntual."),
 };
 
 export const sectionSummaryIntent: WriteIntent<typeof sectionShape> = {
@@ -116,7 +128,12 @@ export const sectionSummaryIntent: WriteIntent<typeof sectionShape> = {
         const s = await sectionOf(ctx, input.course_id, input.section_number);
         const html = input.summary === "" ? "" : toHtml(input.summary, "markdown");
         if (comparable(html) === comparable(s.summary)) throw new CampusError("WRITE_NOT_ALLOWED", "Ese ya es el resumen de la sección.");
-        return sectionDraft(input.course_id, { id: s.id, section: s.section ?? input.section_number, name: s.name ?? "", summary: s.summary ?? "" }, html, null);
+        // ADR-136: un reemplazo total no puede degradar en silencio contenido rico del resumen actual.
+        const lost = structureLoss(s.summary ?? "", html);
+        if (lost.length && !input.allow_structure_loss) {
+            throw new CampusError("WRITE_NOT_ALLOWED", `El resumen actual tiene ${lost.join(", ")} que este reemplazo perdería. Para cambiar una celda de una tabla, usá campus_plan_patch_section_summary. Reemplazar todo igual sólo si el usuario lo pidió explícitamente (allow_structure_loss: true).`, { details: { lost } });
+        }
+        return sectionDraft(input.course_id, { id: s.id, section: s.section ?? input.section_number, name: s.name ?? "", summary: s.summary ?? "" }, html, null, lost);
     },
     async undo(plan, result, ctx) {
         if (!result.items.some((r) => r.outcome === "verificado" || r.outcome === "con_diferencias")) return { kind: "ninguno", reason: "La acción no aplicó cambios." };

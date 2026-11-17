@@ -2356,6 +2356,12 @@ export const WRITE_WEB_READS: Readonly<Record<string, { path: string; query: Rec
         query: { cmid: int },
         effects: "Lectura del formulario de importación (categorías del banco). Moodle puede crear la categoría por defecto del banco si no existe, y reserva un borrador vacío.",
     },
+    // ADR-136: el resumen de una sección tal como está guardado (sin filtros ni URLs reescritas), para editarlo en el lugar.
+    editsection_form: {
+        path: "/course/editsection.php",
+        query: { id: int },
+        effects: "Lectura del formulario de una sección (resumen tal como está guardado). Moodle copia las imágenes del resumen a un borrador privado nuevo.",
+    },
     modedit_form: {
         path: "/course/modedit.php",
         query: { update: int },

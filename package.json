@@ -21,6 +21,7 @@
     "@modelcontextprotocol/sdk": "1.32.0",
     "@napi-rs/keyring": "2.1.0",
     "jose": "6.2.12",
+    "parse5": "8.0.1",
     "pdfjs-dist": "6.4.299",
     "zod": "4.6.5"
   },

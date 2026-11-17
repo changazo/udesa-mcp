@@ -35,6 +35,7 @@ import { quizAddRandomIntent, quizSlotMaxmarkIntent } from "./intents/quiz-struc
 import { GROUPING_INTENTS } from "./intents/groupings.js";
 import { editActivityTextIntent } from "./intents/edit-text.js";
 import { SMALL_EDIT_INTENTS } from "./intents/small-edits.js";
+import { patchSectionSummaryIntent } from "./intents/section-patch.js";
 import { choiceOptionsIntent } from "./intents/choice-options.js";
 import { activityFilesIntent } from "./intents/activity-files.js";
 import { bookChapterIntent } from "./intents/book-chapters.js";
@@ -87,7 +88,7 @@ ${WRITE_INSTRUCTIONS}`;
  * Intenciones registradas. W1: foros. La de prueba de W0 sólo existe contra el Moodle sintético
  * (.test). Que una intención exista no habilita nada: hace falta la capacidad en write_policy.
  */
-const ALL_INTENTS: WriteIntent<any>[] = [...FORUM_INTENTS, ...W2_INTENTS, ...LAYOUT_INTENTS, gradeIntent, ...ATTENDANCE_INTENTS, ...QUIZ_INTENTS, ...GROUP_INTENTS, questionImportIntent, quizAddQuestionsIntent, createContentIntent, editDatesIntent, assignOverrideIntent, deleteContentIntent, createSectionIntent, questionStatusIntent, postAttachmentsIntent, forumGradeIntent, quizGradeIntent, quizAddRandomIntent, quizSlotMaxmarkIntent, ...GROUPING_INTENTS, editActivityTextIntent, ...SMALL_EDIT_INTENTS, choiceOptionsIntent, activityFilesIntent, bookChapterIntent, glossaryEntryIntent, wikiPageIntent, dataEntryIntent, dataFieldIntent, lessonPageIntent, activitySettingsIntent, duplicateActivityIntent, calendarEventDeleteIntent, ...REMOVE_EXISTING_INTENTS, moveSectionIntent, ...EDIT_EXISTING_INTENTS, quizLayoutIntent, lessonQuestionIntent, ...FORUM_MODERATION_INTENTS, gradingDefinitionIntent, gradeAdvancedIntent, ...GRADEBOOK_INTENTS, questionnaireQuestionIntent, overrideEditIntent, glossaryCategoryIntent, choicegroupGroupsIntent, h5pContentIntent, labLtiToolIntent, labLtiExerciseIntent, ...STUDENT_WORK_INTENTS, sendMessageIntent, createAssignmentIntent, syntheticMarkerIntent];
+const ALL_INTENTS: WriteIntent<any>[] = [...FORUM_INTENTS, ...W2_INTENTS, ...LAYOUT_INTENTS, gradeIntent, ...ATTENDANCE_INTENTS, ...QUIZ_INTENTS, ...GROUP_INTENTS, questionImportIntent, quizAddQuestionsIntent, createContentIntent, editDatesIntent, assignOverrideIntent, deleteContentIntent, createSectionIntent, questionStatusIntent, postAttachmentsIntent, forumGradeIntent, quizGradeIntent, quizAddRandomIntent, quizSlotMaxmarkIntent, ...GROUPING_INTENTS, editActivityTextIntent, ...SMALL_EDIT_INTENTS, patchSectionSummaryIntent, choiceOptionsIntent, activityFilesIntent, bookChapterIntent, glossaryEntryIntent, wikiPageIntent, dataEntryIntent, dataFieldIntent, lessonPageIntent, activitySettingsIntent, duplicateActivityIntent, calendarEventDeleteIntent, ...REMOVE_EXISTING_INTENTS, moveSectionIntent, ...EDIT_EXISTING_INTENTS, quizLayoutIntent, lessonQuestionIntent, ...FORUM_MODERATION_INTENTS, gradingDefinitionIntent, gradeAdvancedIntent, ...GRADEBOOK_INTENTS, questionnaireQuestionIntent, overrideEditIntent, glossaryCategoryIntent, choicegroupGroupsIntent, h5pContentIntent, labLtiToolIntent, labLtiExerciseIntent, ...STUDENT_WORK_INTENTS, sendMessageIntent, createAssignmentIntent, syntheticMarkerIntent];
 
 /** En remoto no hay archivos locales: la importación de preguntas sólo existe en el servidor local. */
 const LOCAL_FILE_INTENTS = new Set(["question_import"]);

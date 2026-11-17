@@ -6,6 +6,7 @@ import type { Difference, Plan, PlanDraft, PlanItem } from "../plan.js";
 import { comparable, toHtml } from "../text.js";
 import { DESCRIPTION_KINDS } from "../functions.js";
 import { fieldOf, readModForm, stableHtml } from "./modform.js";
+import { structureLoss } from "../html-patch.js";
 
 /**
  * W6 · Editar la descripción (consigna) de tareas, cuestionarios, foros y páginas, el contenido de las
@@ -186,6 +187,7 @@ const shape = {
     external_url: z.string().min(1).max(1900).optional().describe("Sólo enlaces: nueva dirección http(s)."),
     content: z.string().min(1).max(200_000).optional().describe("Sólo páginas: nuevo contenido (Markdown)."),
     max_grade: z.number().int().min(1).max(100).optional().describe("Sólo tareas: nueva nota máxima en puntos (sólo si nadie tiene nota)."),
+    allow_structure_loss: z.boolean().optional().describe("Sólo si el usuario pidió reemplazar el texto completo sabiendo que se pierden tablas, imágenes, enlaces o estilos del actual (R3)."),
 };
 
 export const editActivityTextIntent: WriteIntent<typeof shape> = {
@@ -227,8 +229,16 @@ export const editActivityTextIntent: WriteIntent<typeof shape> = {
             if (graded.length) throw new CampusError("WRITE_NOT_ALLOWED", `La tarea ya tiene ${graded.length} nota(s): cambiar la nota máxima cambiaría su sentido. No se admite por ahora.`);
             change.grade = input.max_grade;
         }
+        // ADR-136: reemplazar el texto completo no puede perder en silencio tablas, imágenes, enlaces o estilos del actual.
+        const lost = [...(change.introHtml !== undefined ? structureLoss(c.intro, change.introHtml).map((x) => `${x} de la descripción`) : []), ...(change.contentHtml !== undefined ? structureLoss(c.content ?? "", change.contentHtml).map((x) => `${x} del contenido`) : [])];
+        if (lost.length && !input.allow_structure_loss) throw new CampusError("WRITE_NOT_ALLOWED", `El texto actual tiene ${lost.join(", ")} que este reemplazo perdería. Reescribilo conservándolos o, si el usuario pidió reemplazarlo todo, allow_structure_loss: true.`, { details: { lost } });
         if (change.introHtml !== undefined && comparable(change.introHtml) === comparable(c.intro) && change.contentHtml === undefined && change.grade === undefined && change.url === undefined) throw new CampusError("WRITE_NOT_ALLOWED", "La descripción ya es esa.");
-        return draftFor(input.course_id, c, change, null);
+        const d = draftFor(input.course_id, c, change, null);
+        if (lost.length) {
+            d.base_risk = "R3";
+            d.warnings.push(`Reemplazo destructivo pedido explícitamente (allow_structure_loss): se pierden ${lost.join(", ")}.`);
+        }
+        return d;
     },
     async undo(plan, result, ctx) {
         if (!result.items.some((r) => r.outcome === "verificado" || r.outcome === "con_diferencias")) return { kind: "ninguno", reason: "La acción no aplicó cambios." };

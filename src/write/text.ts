@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { htmlToText } from "../domain/html.js";
+import { CampusError } from "../errors.js";
 
 /**
  * Texto del docente → HTML que se envía a Moodle (directiva §8.1: «formato forzado a HTML: el
  * Markdown se convierte en el servidor y el plan muestra el HTML resultante»). Conversor mínimo y
- * cerrado: todo se escapa y sólo se generan párrafos, saltos, títulos, listas, negrita, cursiva,
- * código y enlaces http(s)/mailto. El HTML que llega como «html» se envía tal cual (Moodle lo
+ * cerrado: todo se escapa y sólo se generan párrafos, saltos, títulos, listas, tablas (con la fila
+ * separadora estándar), negrita, cursiva, código, imágenes http(s) y enlaces http(s)/mailto (ADR-136). El HTML que llega como «html» se envía tal cual (Moodle lo
  * limpia al mostrarlo) y el plan lo muestra.
  */
 export type TextFormat = "markdown" | "html" | "texto";
@@ -17,8 +18,29 @@ function inline(s: string): string {
     out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
     out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     out = out.replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
+    // Imagen antes que enlace: si no, «![x](url)» quedaba como «!» más un enlace (ADR-136).
+    out = out.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, (_m, alt: string, src: string) => `<img src="${src}" alt="${alt}">`);
     out = out.replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:)[^)\s]+)\)/g, (_m, text: string, href: string) => `<a href="${href}">${text}</a>`);
     return out;
+}
+
+/** Celdas de una fila de tabla Markdown (`| a | b |`), con `\|` como barra literal. */
+function tableCells(line: string): string[] {
+    const t = line.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "");
+    return t.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
+}
+const TABLE_SEP = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+const looksLikeRow = (l: string) => /^\s*\|.*\|\s*$/.test(l);
+
+function table(head: string, sep: string, rows: string[]): string {
+    const cols = tableCells(head);
+    const align = tableCells(sep).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : null));
+    const cell = (tag: "th" | "td", text: string, i: number) => `<${tag}${align[i] ? ` style="text-align: ${align[i]};"` : ""}>${inline(text)}</${tag}>`;
+    const body = rows.map((r) => {
+        const c = tableCells(r);
+        return `<tr>${cols.map((_, i) => cell("td", c[i] ?? "", i)).join("")}</tr>`;
+    });
+    return `<table><thead><tr>${cols.map((c, i) => cell("th", c, i)).join("")}</tr></thead><tbody>${body.join("")}</tbody></table>`;
 }
 
 /**
@@ -52,7 +74,8 @@ export function markdownToHtml(md: string, codeBlocks: CodeBlocks = "pre"): stri
         if (list) out.push(`<${list.tag}>${list.items.map((i) => `<li>${inline(i)}</li>`).join("")}</${list.tag}>`);
         list = null;
     };
-    for (const raw of lines) {
+    for (let i = 0; i < lines.length; i++) {
+        const raw = lines[i]!;
         // Dentro de un bloque cercado no se interpreta nada: cada línea es código tal cual.
         if (fence) {
             if (FENCE_CLOSE.test(raw)) {
@@ -68,6 +91,21 @@ export function markdownToHtml(md: string, codeBlocks: CodeBlocks = "pre"): stri
             continue;
         }
         const line = raw.trimEnd();
+        // Tabla: encabezado + fila separadora (`|---|:--:|`) + filas con barras (ADR-136).
+        if (line.includes("|") && TABLE_SEP.test(lines[i + 1] ?? "") && (lines[i + 1] ?? "").includes("-")) {
+            flushPara();
+            flushList();
+            const rows: string[] = [];
+            let j = i + 2;
+            while (j < lines.length && lines[j]!.trim() && lines[j]!.includes("|")) rows.push(lines[j++]!);
+            out.push(table(line, lines[i + 1]!, rows));
+            i = j - 1;
+            continue;
+        }
+        // Filas con barras sin la fila separadora: no se convierten en un párrafo con «|» (antes pasaba en silencio).
+        if (looksLikeRow(line) && looksLikeRow(lines[i + 1] ?? "")) {
+            throw new CampusError("WRITE_NOT_ALLOWED", "Esto parece una tabla Markdown sin la fila separadora (| --- | --- |) debajo del encabezado. Agregala o escribí el texto sin barras al principio y al final.");
+        }
         const h = /^(#{1,4})\s+(.+)$/.exec(line);
         const ul = /^\s*[-*]\s+(.+)$/.exec(line);
         const ol = /^\s*\d+[.)]\s+(.+)$/.exec(line);

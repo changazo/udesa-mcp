@@ -114,3 +114,21 @@ describe("enlaces y etiquetas (ADR-076)", () => {
         expect((await errOf(plan(h, { course_module_id: 9815, external_url: "ftp://c.example/" }))).code).toBe("WRITE_NOT_ALLOWED");
     });
 });
+
+describe("ADR-136 · reemplazo de texto que perdería contenido rico", () => {
+    it("una página con tabla e imagen no se reemplaza por texto plano salvo pedido explícito (R3)", async () => {
+        const { h, acts, posts } = await harness();
+        acts.get(9814)!.content = '<table style="width: 100%;"><tbody><tr><td>Clase</td><td>Día</td></tr></tbody></table><p><img src="https://x.test/i.png" alt="i"></p>';
+        const e = await errOf(plan(h, { course_module_id: 9814, content: "Clase: miércoles" }));
+        expect(e.code).toBe("WRITE_NOT_ALLOWED");
+        expect(e.details?.lost).toEqual(expect.arrayContaining(["1 tabla(s) del contenido", "1 imagen(es) del contenido"]));
+        expect(posts).toHaveLength(0);
+        const p = await plan(h, { course_module_id: 9814, content: "Clase: miércoles", allow_structure_loss: true });
+        expect(p.risk).toBe("R3");
+        // Rehacerla en Markdown conserva tabla e imagen, pero no el estilo de ancho: también se avisa, y sólo eso.
+        const md = "| Clase | Día |\n|---|---|\n\n![i](https://x.test/i.png)";
+        expect((await errOf(plan(h, { course_module_id: 9814, content: md }))).details?.lost).toEqual(["estilos (atributo style) del contenido"]);
+        acts.get(9814)!.content = acts.get(9814)!.content!.replace(' style="width: 100%;"', "");
+        expect((await plan(h, { course_module_id: 9814, content: md })).risk).toBe("R2");
+    });
+});

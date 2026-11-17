@@ -52,7 +52,7 @@ Para cada tipo de elemento, qué hace el MCP de escritura (perfil `docente-compl
 
 | Elemento | Crear | Editar | Borrar |
 |---|---|---|---|
-| Sección | `campus_plan_create_section` | Nombre (`campus_plan_rename`), resumen (`campus_plan_section_summary`) y orden (`campus_plan_move_section`) | `campus_plan_delete_content` con `section_number`, con todo su contenido |
+| Sección | `campus_plan_create_section` | Nombre (`campus_plan_rename`), resumen completo (`campus_plan_section_summary`) o una celda de una tabla del resumen (`campus_plan_patch_section_summary`, ADR-136) y orden (`campus_plan_move_section`) | `campus_plan_delete_content` con `section_number`, con todo su contenido |
 | Subsección | `campus_plan_create_content` con `type: "subsection"` | Nombre: `campus_plan_rename` sobre la actividad de la subsección; resumen: `campus_plan_section_summary` con su número de sección | `campus_plan_delete_content` con el `section_number` de la subsección (sobre su actividad se rechaza) |
 
 ## Lo que no se cubre, y por qué
