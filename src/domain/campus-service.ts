@@ -59,7 +59,8 @@ import { parseGradingPageData, parseQuizLayout } from "./quiz-structure.js";
 import { gradeTextWithoutAdvanced, parseAdvancedGrading } from "./grading-form.js";
 import { hasSubmissionRecord, NO_SUBMISSION_WARNING, readUserFlags } from "./submission-guard.js";
 import { parseQuestionXml } from "./question-xml.js";
-import { parseLogCsv, parseParticipationHtml, parseResponsesCsv } from "./reports.js";
+import { parseLogCsv, parseParticipationHtml, parseResponsesCsv, type LogEvent } from "./reports.js";
+import { buildHistory } from "./submission-history.js";
 import { parseSince, sourceDate, type SourceDate } from "../util/time.js";
 import { classifyFile, decodeTextWithInfo, notebookToMarkdown, sniffImage, SUPPORTED_DESCRIPTION, type FileKind } from "../documents/formats.js";
 import { extractOfficeMedia } from "../documents/office-media.js";
@@ -1995,6 +1996,21 @@ export class CampusService {
 
     // ---------- Reportes docentes (directiva §9) ----------
 
+    /** Parámetros del CSV de report/log: base fija + filtros cerrados (el orden fija el hash de cursores). */
+    private courseLogParams(courseId: number, filters: Record<string, string>): Record<string, string> {
+        return { id: String(courseId), chooselog: "1", logreader: "logstore_standard", download: "csv", ...filters };
+    }
+
+    /**
+     * Lector interno del registro estándar (report/log, CSV): una descarga y un parseo. Lo comparten
+     * campus_get_course_report y el historial de entregas (ADR-135); mismo transporte, capacidad y
+     * errores (sesión vencida, permiso denegado o CSV inválido nunca son «sin eventos»).
+     */
+    private async readCourseLog(courseId: number, params: Record<string, string>) {
+        const page = await this.withWeb("read_course_report", courseId, (op) => op.get("course_log", params));
+        return parseLogCsv(new TextDecoder().decode(page.bytes)).events;
+    }
+
     /**
      * Reporte del curso: registros (report/log, CSV) o participación (report/participation, HTML).
      * Requiere sesión web. Variantes cerradas con parámetros propios; nada de filtros libres.
@@ -2043,14 +2059,15 @@ export class CampusService {
         if (input.kind === "logs") {
             const day = input.date !== undefined ? parseSince(input.date, tz) : null;
             if (input.date !== undefined && (day === null || !/^\d{4}-\d{2}-\d{2}$/.test(input.date))) throw new CampusError("POLICY_DENIED", "date debe ser AAAA-MM-DD (un día; la fuente filtra por día, no por intervalos).");
-            const params: Record<string, string> = { id: String(courseId), chooselog: "1", logreader: "logstore_standard", download: "csv" };
-            if (day !== null) params.date = String(day);
-            if (input.participant_id !== undefined) params.user = String(input.participant_id);
-            if (input.course_module_id !== undefined) params.modid = String(input.course_module_id);
-            if (input.group_id !== undefined) params.group = String(input.group_id);
-            if (input.action !== undefined) params.modaction = input.action;
-            if (input.origin !== undefined) params.origin = input.origin;
-            if (input.edulevel !== undefined) params.edulevel = String(input.edulevel);
+            const filters: Record<string, string> = {};
+            if (day !== null) filters.date = String(day);
+            if (input.participant_id !== undefined) filters.user = String(input.participant_id);
+            if (input.course_module_id !== undefined) filters.modid = String(input.course_module_id);
+            if (input.group_id !== undefined) filters.group = String(input.group_id);
+            if (input.action !== undefined) filters.modaction = input.action;
+            if (input.origin !== undefined) filters.origin = input.origin;
+            if (input.edulevel !== undefined) filters.edulevel = String(input.edulevel);
+            const params = this.courseLogParams(courseId, filters);
             const filterKey = nameHash(JSON.stringify(params));
             const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
             let offset = 0;
@@ -2059,8 +2076,7 @@ export class CampusService {
                 if (c.c !== courseId || c.f !== parseInt(filterKey, 16) || c.l !== limit) throw new CampusError("RESOURCE_OUT_OF_SCOPE", "El cursor no corresponde a este reporte y filtros.");
                 offset = c.o;
             }
-            const page = await this.withWeb("read_course_report", courseId, (op) => op.get("course_log", params));
-            const { events } = parseLogCsv(new TextDecoder().decode(page.bytes));
+            const events = await this.readCourseLog(courseId, params);
             const slice = events.slice(offset, offset + limit);
             const next = offset + slice.length < events.length ? encodeCursor<ReportCursor>({ v: 1, c: courseId, f: parseInt(filterKey, 16), l: limit, o: offset + slice.length }) : null;
             return {
@@ -2141,6 +2157,148 @@ export class CampusService {
     }
 
     /** Reporte de un cuestionario: respuestas (CSV). Las estadísticas quedan bloqueadas por política. */
+    /**
+     * Historial de entregas de un participante en una tarea (ADR-135): primer envío explícito,
+     * primer guardado de contenido, último cambio y comparación con el vencimiento efectivo. Lee el
+     * registro estándar con el lector compartido: una descarga con el filtro nativo de usuario
+     * (actor = participante) y otra de los cambios de la actividad (acciones delegadas y candidatos
+     * ambiguos). Nunca devuelve IP, descripciones, nombres, archivos ni texto de entregas.
+     */
+    async getSubmissionHistory(input: { course_id: number; course_module_id: number; participant_id: number; cursor?: string; limit?: number }) {
+        const courseId = input.course_id;
+        const cmid = input.course_module_id;
+        const P = input.participant_id;
+        await this.assertTeacherCourse(courseId, "el historial de entregas de los participantes");
+        const at = this.now();
+        const tz = this.p.timezone;
+        const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+        let offset = 0;
+        if (input.cursor) {
+            const c = decodeCursor<HistoryCursor>(input.cursor);
+            if (c.t !== HISTORY_CURSOR || c.c !== courseId || c.m !== cmid || c.p !== P || c.l !== limit) throw new CampusError("RESOURCE_OUT_OF_SCOPE", "El cursor no corresponde a este historial.");
+            offset = c.o;
+        }
+        // CMID → tarea, con evidencia de mod_assign_get_assignments; si no es tarea, se dice.
+        const { list } = await this.loadAssignments(courseId);
+        const found = list.find((x) => x.cmid === cmid);
+        if (!found) {
+            const sections = await this.tracked("read_course", courseId, () => this.t.call("core_course_get_contents", { courseid: courseId, options: [{ name: "excludecontents", value: 1 }] }, CourseContentsSchema));
+            const mod = sections.flatMap((x) => x.modules).find((m) => m.id === cmid);
+            if (!mod) throw new CampusError("RESOURCE_OUT_OF_SCOPE", `La actividad ${cmid} no pertenece al curso ${courseId}.`);
+            throw new CampusError("UNSUPPORTED_CONTENT", `La actividad ${cmid} es «${mod.modname}», no una tarea: el historial de entregas es sólo para tareas.`);
+        }
+        const a = await this.ensureAssignment(courseId, found.id);
+        if (a.team_submission) {
+            throw new CampusError("UNSUPPORTED_CONTENT", "Tarea grupal: el historial por participante todavía no está soportado (el registro no permite atribuir el envío del grupo a cada integrante). No se consultaron registros.");
+        }
+        if (a.anonymous) throw new CampusError("POLICY_DENIED", "Tarea con corrección anónima: cruzar registros con un participante revelaría su identidad. No se consultaron registros.");
+        // Pertenencia verificada; la última modificación es el ancla de zona (sin crear registro: ADR-051).
+        const { la, sub, flags } = await this.verifiedSubmission(courseId, a, P);
+        const extension = la?.extensionduedate || flags?.extension || null;
+        const eff = await this.effectiveDates(courseId, a, P, extension);
+        const due =
+            eff.status !== "ok"
+                ? { state: "desconocido" as const, reason: `Vencimiento efectivo desconocido: ${eff.reason}` }
+                : eff.applicable_due
+                  ? { state: "ok" as const, unix: eff.applicable_due.unix }
+                  : { state: "sin_vencimiento" as const };
+
+        const own = await this.readCourseLog(courseId, this.courseLogParams(courseId, { user: String(P), modid: String(cmid), modaction: "cud" }));
+        let module: LogEvent[] | null = null;
+        let moduleUnavailable: string | null = null;
+        try {
+            module = await this.readCourseLog(courseId, this.courseLogParams(courseId, { modid: String(cmid), modaction: "cud" }));
+        } catch (e) {
+            // Sólo el tope de filas degrada a cobertura parcial; sesión, permisos y formato siguen siendo errores.
+            if (!(e instanceof CampusError) || e.code !== "INCOMPLETE_RESULT") throw e;
+            moduleUnavailable = e.message;
+        }
+        const h = buildHistory({
+            participantId: P,
+            cmid,
+            timeZone: tz,
+            own,
+            module,
+            moduleUnavailable,
+            anchorUnix: sub?.timemodified ?? null,
+            due,
+            openingUnix: eff.for_participant?.allow_submissions_from?.unix ?? null,
+        });
+        const page = h.timeline.slice(offset, offset + limit);
+        const next = offset + page.length < h.timeline.length ? encodeCursor<HistoryCursor>({ v: 1, t: HISTORY_CURSOR, c: courseId, m: cmid, p: P, l: limit, o: offset + page.length }) : null;
+        const warnings = [
+            "Creación del registro, guardado de contenido (archivo o texto), envío y modificación son hechos distintos: la «última modificación» de campus_get_submission no es la hora del primer envío.",
+            "Retención de registros desconocida: el historial es lo que el Campus conserva hoy; coverage.complete significa que se recuperó todo lo disponible, no que se conserve todo desde la apertura.",
+            "La comparación es contra el vencimiento efectivo consultado hoy (prórrogas y excepciones que Moodle confirma), no una reconstrucción del vencimiento vigente al momento del envío. La fecha de corte no es el vencimiento.",
+            "Sólo se atribuyen eventos por ID (filtro nativo de usuario o ID de usuario afectado en el registro), nunca por nombre. Las acciones de otra persona sin ID del participante quedan como no atribuibles.",
+            "Leer el registro deja en el Campus un evento «reporte visto» a tu nombre (dos descargas por consulta).",
+            "Contiene datos de estudiantes: usalos sólo para la tarea docente pedida, no los copies al repositorio ni a documentos compartidos. Se omiten IP, nombres, descripciones, archivos y texto de la entrega.",
+        ];
+        if (h.unconfirmed_labels_used) warnings.push("Algunas etiquetas reconocidas en este export todavía no se confirmaron contra un export real del Campus (label.evidence = sin_confirmar).");
+        if (h.counts.non_attributable_candidates) warnings.push(`${h.counts.non_attributable_candidates} evento(s) de la tarea no se pudieron atribuir al participante ni descartar: no se usan como envío.`);
+        if (h.counts.unknown_labels) warnings.push(`${h.counts.unknown_labels} evento(s) con etiqueta desconocida: no se convierten en envíos.`);
+        if (h.due_may_have_changed_after_submission) warnings.push("Hubo prórrogas, excepciones o cambios de configuración de la tarea después del primer envío observado: el vencimiento de entonces pudo ser otro.");
+        if (moduleUnavailable) warnings.push(`No se pudo leer el registro completo de la actividad (${moduleUnavailable}): sin acciones delegadas ni cobertura previa, no se afirma una tardanza.`);
+        return {
+            data: {
+                ref: { course_id: courseId, course_module_id: cmid, assignment_id: a.assignment_id, participant_id: P },
+                assignment_name: a.name,
+                first_submission_observed: h.first_submission_observed,
+                first_content_save_observed: h.first_content_save_observed,
+                last_change_observed: h.last_change_observed,
+                applicable_due: {
+                    due: eff.applicable_due,
+                    status: eff.status,
+                    reason: eff.reason,
+                    source: eff.source,
+                    extension: eff.extension,
+                    cutoff: eff.for_participant?.cutoff ?? eff.base.cutoff,
+                    compared_against: "vencimiento_efectivo_actual" as const,
+                    may_have_changed_after_submission: h.due_may_have_changed_after_submission,
+                },
+                timing: h.timing,
+                time_zone: h.time_zone,
+                summary: { ...h.counts, prior_interval_covered: h.prior_interval_covered },
+                current_status: sub?.status ?? null,
+                timeline_total: h.timeline.length,
+                timeline: page,
+            },
+            source: {
+                ...this.source(
+                    courseId,
+                    ["mod_assign_get_assignments", "mod_assign_list_participants", sub ? "mod_assign_get_submission_status" : "mod_assign_get_user_flags", "mod_assign_get_participant"],
+                    at,
+                    `${this.p.site_url}/report/log/index.php?id=${courseId}&modid=${cmid}&user=${P}`,
+                ),
+                adapter: "web_export" as const,
+                operation: "course_log_csv",
+            },
+            coverage: {
+                complete: next === null && offset === 0 && module !== null,
+                consistency: "best_effort" as const,
+                pages_read: module ? 2 : 1,
+                has_more: next !== null,
+                next_cursor: next,
+                truncation_reason: next ? `Cronología en páginas de ${limit}; los resúmenes ya cubren todo lo recuperado. Continuá con next_cursor.` : module === null ? "Falta el registro completo de la actividad." : null,
+                detail: {
+                    scope: { course_id: courseId, course_module_id: cmid, participant_id: P, filters: "modid+user (actor) y modid; acciones c/u/d; todos los días conservados", logreader: "logstore_standard" },
+                    time: {
+                        from: h.earliest_event_unix !== null ? new Date(h.earliest_event_unix * 1000).toISOString() : null,
+                        to: at.toISOString(),
+                        time_zone: `${tz} (${h.time_zone.verified ? "verificada con un ancla" : "no verificada"})`,
+                    },
+                    omitted: [
+                        { what: "dirección IP, nombres, descripciones crudas", count: null, reason: "Datos personales o ajenos; la atribución usa sólo IDs." },
+                        { what: "eventos de otros participantes", count: h.counts.other_participants_events_ignored, reason: "No corresponden al participante pedido." },
+                        { what: "retención del registro", count: null, reason: "Desconocida: no se puede probar que el Campus conserve todo." },
+                    ],
+                },
+            },
+            warnings,
+            content_policy: UNTRUSTED,
+        } satisfies SourceResult<unknown>;
+    }
+
     async getQuizReport(input: { course_id: number; quiz_id: number; kind: "responses" | "statistics"; attempts?: string; whichtries?: string; group_id?: number; include_question_text?: boolean; cursor?: string; limit?: number }) {
         const courseId = input.course_id;
         await this.assertTeacherCourse(courseId, "los reportes del cuestionario");
@@ -4092,6 +4250,16 @@ interface ReportCursor {
     o: number;
 }
 
+interface HistoryCursor {
+    v: number;
+    t: typeof HISTORY_CURSOR;
+    c: number;
+    m: number;
+    p: number;
+    l: number;
+    o: number;
+}
+
 interface QuestionCursor {
     v: number;
     c: number;
@@ -4106,6 +4274,8 @@ interface QuestionCategoryCursor extends QuestionCursor {
     t: number;
 }
 const QUESTION_CATEGORY_CURSOR = 73;
+/** Marca de los cursores del historial de entregas (ADR-135). */
+const HISTORY_CURSOR = 135;
 
 /** Discusiones que la búsqueda con respuestas abre como máximo por pedido (una llamada al lector cada una). */
 const FORUM_SEARCH_MAX_DISCUSSIONS = 60;

@@ -264,3 +264,87 @@ describe("W5 · aprobación por página y KV", () => {
         for (const secret of [VALID_TOKEN, "kv-token-sintetico", SECRET, token!]) expect(all).not.toContain(secret);
     });
 });
+
+describe("ADR-134 · panel del freno en el remoto (/admin/escrituras)", () => {
+    const STATE_KEY = "w:sintetico-escritura:state";
+    /** Freno abierto en el KV (como lo dejaría el motor tras tres fallos), con o sin el interruptor manual. */
+    const tripped = (s: S, disabled = false) =>
+        s.kv.data.set(STATE_KEY, JSON.stringify({ paused: true, paused_at: new Date(s.clock.ms).toISOString(), paused_until: new Date(s.clock.ms + 7_200_000).toISOString(), paused_reason: "3 fallos distintos", brake_cycle: 1, failures: [], consecutive_failures: 3, disabled, day: null, actions_today: 7, messages_today: 0 }));
+    async function adminCookie(s: S) {
+        const first = await s.call("/admin/escrituras");
+        expect(first.status).toBe(303);
+        const gh = new URL(first.headers.get("location")!);
+        expect(gh.origin).toBe("https://github.com");
+        const nonce = first.headers.get("set-cookie")!.split(";")[0]!;
+        return s.call(`/oauth/github/callback?${new URLSearchParams({ code: "gh-good-code", state: gh.searchParams.get("state")! })}`, { headers: { cookie: nonce } });
+    }
+    async function ownerPage(s: S) {
+        const cb = await adminCookie(s);
+        expect(cb.status).toBe(302);
+        expect(cb.headers.get("location")).toBe(`${BASE}/admin/escrituras`);
+        const cookie = cb.headers.getSetCookie().find((c) => c.startsWith("__Host-campus_approver="))!.split(";")[0]!;
+        const page = await s.call("/admin/escrituras", { headers: { cookie } });
+        expect(page.status).toBe(200);
+        const html = await page.text();
+        return { cookie, html, form: /name="form" value="([^"]+)"/.exec(html)?.[1] ?? null };
+    }
+    const post = (s: S, cookie: string | null, body: Record<string, string>, extra: Record<string, string> = {}) =>
+        s.call("/admin/escrituras/reanudar", { method: "POST", headers: { ...(cookie ? { cookie } : {}), "content-type": "application/x-www-form-urlencoded", ...extra }, body: new URLSearchParams(body) });
+
+    it("WRITE_DISABLED en el remoto apunta al panel y a la hora de reapertura, no al comando local", async () => {
+        const s = setup();
+        const { token } = await login(s);
+        tripped(s);
+        const r = await tool(s, token!, "campus_plan_marcador_sintetico", { course_id: COURSE, changes: [{ marker_id: 1, value: "x" }] });
+        expect(r.data.error.code).toBe("WRITE_DISABLED");
+        expect(r.data.error.details).toMatchObject({ reason: "automatic_cooldown", retry_after_seconds: 7200 });
+        expect(r.data.error.human_action).toContain(`${BASE}/admin/escrituras`);
+        expect(r.data.error.human_action).not.toContain("write resume");
+        const st = await tool(s, token!, "campus_get_write_status", {});
+        expect(st.data.brake).toMatchObject({ state: "open", recovery: { manual: `${BASE}/admin/escrituras` } });
+    });
+
+    it("el dueño ve el estado y reanuda con confirmación; queda auditado; el formulario no se reusa", async () => {
+        const s = setup();
+        tripped(s);
+        const { cookie, html, form } = await ownerPage(s);
+        expect(html).toContain("Pausadas por el freno automático");
+        expect(form).not.toBeNull();
+        expect((await post(s, cookie, { form: form!, confirm: "otra cosa" })).status).toBe(400);
+        const ok = await post(s, cookie, { form: form!, confirm: "REANUDAR" });
+        expect(ok.status).toBe(200);
+        expect(await ok.text()).toContain("Escrituras reanudadas");
+        const st = JSON.parse(s.kv.data.get(STATE_KEY) as string);
+        expect(st).toMatchObject({ paused: false, disabled: false, last_recovery: { via: "panel_remoto" } });
+        expect((s.kv.data.get("w:sintetico-escritura:audit") as string[]).some((l) => l.includes('"brake_resumed_manually"') && l.includes(`github:${OWNER_GH}`))).toBe(true);
+        expect((await post(s, cookie, { form: form!, confirm: "REANUDAR" })).status).toBe(409);
+        // Sin freno: la página no ofrece reanudar.
+        expect((await ownerPage(s)).form).toBeNull();
+    });
+
+    it("reanudar no enciende el interruptor manual y lo dice", async () => {
+        const s = setup();
+        tripped(s, true);
+        const { cookie, form } = await ownerPage(s);
+        const res = await post(s, cookie, { form: form!, confirm: "REANUDAR" });
+        expect(await res.text()).toContain("interruptor manual sigue APAGADO");
+        expect(JSON.parse(s.kv.data.get(STATE_KEY) as string)).toMatchObject({ paused: false, disabled: true });
+    });
+
+    it("no desbloquean: sin sesión, otro usuario de GitHub, GET, formulario ajeno o vencido, ni un token MCP", async () => {
+        const s = setup();
+        tripped(s);
+        const { token } = await login(s);
+        const { cookie, form } = await ownerPage(s);
+        // Otro usuario de GitHub ni siquiera obtiene la sesión.
+        const stranger = setup({ ghUser: () => 999, kv: s.kv });
+        expect((await adminCookie(stranger)).status).toBe(403);
+        expect((await post(s, null, { form: form!, confirm: "REANUDAR" })).status).toBe(401);
+        expect((await post(s, null, { form: form!, confirm: "REANUDAR" }, { authorization: `Bearer ${token}` })).status).toBe(401);
+        expect((await s.call("/admin/escrituras/reanudar", { headers: { cookie } })).status).toBe(404);
+        expect((await post(s, cookie, { form: "a.b.c", confirm: "REANUDAR" })).status).toBe(409);
+        s.clock.ms += 11 * 60_000;
+        expect((await post(s, cookie, { form: form!, confirm: "REANUDAR" })).status).toBe(409);
+        expect(JSON.parse(s.kv.data.get(STATE_KEY) as string).paused).toBe(true);
+    });
+});

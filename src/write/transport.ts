@@ -76,13 +76,21 @@ export class WriteTransport {
             } catch {
                 throw new CampusError("NETWORK_ERROR", "No se pudieron subir los adjuntos (falla de red). No se publicó nada; si algo llegó, queda en tu borrador privado y Moodle lo purga a los 4 días.");
             }
+            // ADR-134: un rechazo HTTP de la subida identifica etapa y estado, sin volcar el cuerpo (HTML del Campus).
+            if (res.status >= 400 && res.status < 500 && res.status !== 401) {
+                await res.body?.cancel().catch(() => undefined);
+                const pdf = files.some((f) => /\.pdf$/i.test(f.filename));
+                throw new CampusError("MOODLE_REJECTED", `Moodle rechazó ${files.length === 1 ? "este archivo" : "estos archivos"} en la etapa de subida (HTTP ${res.status}). No se publicó nada.${pdf ? " Probá regenerarlo o imprimirlo a PDF (por ejemplo con «Microsoft Print to PDF») y armá un plan nuevo con el archivo corregido." : " Revisá el archivo y armá un plan nuevo."}`, {
+                    details: { stage: "upload_draft", http_status: res.status },
+                });
+            }
             let data: unknown;
             try {
                 if (res.status !== 200) throw new Error(String(res.status));
                 data = JSON.parse(new TextDecoder().decode(await readWithLimit(res, 1024 * 1024)));
             } catch (e) {
                 if (e instanceof CampusError && e.code !== "UNSUPPORTED_CONTENT") throw e;
-                throw new CampusError("NETWORK_ERROR", `La subida de adjuntos no devolvió JSON (HTTP ${res.status}). No se publicó nada.`);
+                throw new CampusError("NETWORK_ERROR", `La subida de adjuntos no devolvió JSON (HTTP ${res.status}). No se publicó nada.`, { details: { stage: "upload_draft", http_status: res.status } });
             }
             if (data && typeof data === "object" && !Array.isArray(data)) {
                 const ex = MoodleExceptionSchema.safeParse(data);
@@ -92,7 +100,7 @@ export class WriteTransport {
                     throw new CampusError("AUTH_REQUIRED", "Moodle rechazó el token al subir los adjuntos; no se publicó nada.", { moodleErrorcode: errorcode });
                 }
                 const message = ex.success ? (ex.data.message ?? ex.data.exception) : "respuesta inesperada";
-                throw new CampusError("MOODLE_REJECTED", `Moodle rechazó la subida de adjuntos: ${String(message).slice(0, 300)}. No se publicó nada.`, { moodleErrorcode: errorcode });
+                throw new CampusError("MOODLE_REJECTED", `Moodle rechazó la subida de adjuntos: ${String(message).slice(0, 300)}. No se publicó nada.`, { moodleErrorcode: errorcode, details: { stage: "upload_draft", http_status: res.status } });
             }
             const rows = UploadedSchema.safeParse(data);
             if (!rows.success || rows.data.length !== files.length) throw new CampusError("UNEXPECTED_RESPONSE", "La subida de adjuntos devolvió una respuesta inesperada. No se publicó nada.");
@@ -102,7 +110,7 @@ export class WriteTransport {
             if (failed.length || itemids.size !== 1 || (intoItemid && !itemids.has(intoItemid))) {
                 const [itemid] = [...itemids];
                 if (itemid && ok.length) await this.deleteDraft(itemid, ok.map((r) => String(r.filename ?? ""))).catch(() => undefined);
-                throw new CampusError("MOODLE_REJECTED", `Moodle no guardó ${failed.length || "algunos"} adjunto(s): ${failed.map((r) => `${r.filename ?? "?"} (${r.errortype ?? "sin itemid"})`).join(", ")}. No se publicó nada.`);
+                throw new CampusError("MOODLE_REJECTED", `Moodle no guardó ${failed.length || "algunos"} adjunto(s): ${failed.map((r) => `${r.filename ?? "?"} (${r.errortype ?? "sin itemid"})`).join(", ")}. No se publicó nada.`, { details: { stage: "upload_draft", http_status: res.status } });
             }
             return [...itemids][0]!;
         } catch (e) {

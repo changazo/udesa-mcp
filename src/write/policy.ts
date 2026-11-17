@@ -1,3 +1,4 @@
+import type { BrakeConfig } from "./brake.js";
 import { readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -140,6 +141,14 @@ const WritePolicySchema = z.strictObject({
             dialog_timeout_seconds: z.number().int().min(15).max(120),
         })
         .default({ dialog: true, dialog_timeout_seconds: 120 }),
+    /** ADR-134: freno ante fallos. Opcional: sin la clave valen 3 fallos distintos en 15 minutos y 2 horas de pausa. */
+    brake: z
+        .strictObject({
+            failure_threshold: z.number().int().min(2).max(10).default(3),
+            failure_window_seconds: z.number().int().min(60).max(86_400).default(900),
+            cooldown_seconds: z.number().int().min(300).max(86_400).default(7200),
+        })
+        .default({ failure_threshold: 3, failure_window_seconds: 900, cooldown_seconds: 7200 }),
 });
 
 const WriteProfileFileSchema = z.strictObject({
@@ -173,6 +182,7 @@ export interface WritePolicy {
     notifiable_user_ids: number[];
     human_in_the_loop_from_risk: Risk | "nunca";
     confirmation: { dialog: boolean; dialog_timeout_seconds: number };
+    brake: BrakeConfig;
 }
 
 export interface WriteProfile {
@@ -246,6 +256,7 @@ export function parseWriteProfile(json: unknown, readProfile: Profile, expectedI
             notifiable_user_ids: wp.notifiable_user_ids,
             human_in_the_loop_from_risk: wp.human_in_the_loop_from_risk,
             confirmation: wp.confirmation,
+            brake: wp.brake,
         },
     };
 }

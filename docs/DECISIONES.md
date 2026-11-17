@@ -143,6 +143,8 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [131](#adr-131--presentación-de-archivos-display) | Presentación de archivos (`display`) | adoptada |
 | [132](#adr-132--calificación-de-entregas-grupales) | Calificación de entregas grupales | validada en una entrega real |
 | [133](#adr-133--avisos-en-calificaciones-grupales) | Avisos en calificaciones grupales | implementada; pruebas sintéticas |
+| [134](#adr-134--freno-de-escrituras-con-recuperación-automática) | Freno de escrituras con recuperación automática | adoptada; modifica §5.8 de la directiva de escrituras |
+| [135](#adr-135--historial-de-entregas) | Historial de entregas | adoptada; validación real parcial |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -2286,3 +2288,117 @@ En el plan de calificación grupal, `notify_student` determina si se solicita a 
 Por decisión del docente, el perfil establece `notify_students_default: true`; las calificaciones de tareas y foros solicitan aviso por defecto y admiten `notify_student: false` para desactivarlo. Los deshacer siguen sin avisar.
 
 Se corrigen las descripciones y advertencias de mensajes y calificación que identificaban erróneamente como cuenta de prueba a cualquier destinatario, aunque el perfil general habilita las notificaciones. Los mensajes siguen siendo de a uno, R3 y con aprobación explícita previa.
+
+## ADR-134 · Freno de escrituras con recuperación automática
+
+**Fecha:** 2026-11-16 · **Estatus:** adoptada · **Origen:** directiva del dueño (recuperación y robustez del motor de escrituras). El freno por tres fallos seguidos pausaba las escrituras sin vencimiento. En el remoto, destrabarlo exigía editar el estado en Upstash, y el error sugería un comando local que no toca el KV. Además, reintentar tres veces un mismo PDF rechazado bloqueaba todo el conector.
+
+**Decisión:**
+- **Estados** (derivados en un solo lugar, `src/write/brake.ts`): `closed`, `open` (pausa automática hasta `paused_until`), `half_open` (venció la pausa) y `manual` (pausa sin fecha fiable). El interruptor manual (`disabled`) es otra barrera, de prioridad superior, que nunca vence.
+- **Cooldown de 2 horas, sin tareas programadas.** El vencimiento se evalúa al consultar o al escribir. En `open` no se planifica ni se ejecuta.
+- **Prueba half_open.** Vencida la pausa, la primera ejecución que va a escribir toma un turno de prueba: un lease de 15 minutos atado al ciclo (`brake_cycle`). Consultar el estado o planificar no lo toma.
+  - Si la prueba queda `aplicado_verificado`, el freno se cierra y el historial queda en cero.
+  - Cualquier otro resultado abre otra pausa de 2 horas y otro ciclo. Eso incluye resultados inciertos, parciales o con diferencias: es la transición conservadora, y no se reintenta nada.
+  - Un error previo a escribir (plan obsoleto, archivos vencidos) suelta el turno sin veredicto.
+  - Mientras otra ejecución tiene el turno, la respuesta es `probe_in_progress`.
+  - Una prueba de un ciclo anterior no puede cerrar un freno nuevo.
+- **Transiciones atómicas** (`WriteStore.updateState`):
+  - Remoto: compare-and-set con un script de Redis (`EVAL`, que Upstash admite por REST), con reintentos y espera al azar. Sin TTL en la clave de estado.
+  - Local: candado entre procesos (`write-state.lock` con O_EXCL, abandonado a los 30 s).
+  - Un estado ilegible o un KV caído son un error (`SERVICE_UNAVAILABLE`): nunca se interpretan como «sin freno».
+  - `resume` sólo libera el freno. No toca `disabled`, los contadores del día, la configuración ni la auditoría.
+- **Fallos por objetivo y sistémicos.** Cada fallo deja una huella sin contenido: intención, curso, objetivo, etapa, código, HTTP y sha256 de los archivos.
+  - El umbral cuenta huellas **distintas** dentro de una ventana de 15 minutos. Repetir el mismo intento fallido cuenta una vez.
+  - Los códigos de infraestructura (`AUTH_REQUIRED`, `SERVICE_UNAVAILABLE`, `NETWORK_ERROR`, `RATE_LIMITED`) son sistémicos y cuentan siempre.
+  - Un éxito vacía el historial.
+  - No cuentan los errores previos a emitir: plan obsoleto o vencido, confirmación, política, validación y token rechazado antes de escribir.
+- **Subida rechazada.** Un 4xx de `webservice/upload.php` devuelve `MOODLE_REJECTED` con `stage: upload_draft` y `http_status`. El mensaje sugiere regenerar el PDF y armar un plan nuevo. No se vuelca el cuerpo HTML ni se reintenta, y el archivo nunca se convierte.
+- **Configuración** opcional en `write_policy.brake`: `failure_threshold` (2–10, por defecto 3), `failure_window_seconds` (60–86.400, por defecto 900) y `cooldown_seconds` (300–86.400, por defecto 7.200). Los perfiles actuales no cambian.
+- **Migración no destructiva.** Un estado viejo con `paused=true` y `paused_at` válido toma `paused_at + cooldown` como plazo. Sin fecha fiable, queda `manual` hasta una recuperación administrativa.
+- **Panel remoto `/admin/escrituras`:**
+  - Muestra estado, motivo, inicio, reapertura, fallos y el interruptor.
+  - Usa el mismo login de GitHub del dueño y la misma cookie que la página de aprobación.
+  - `POST /admin/escrituras/reanudar` exige ese formulario firmado: atado al dueño, de 10 minutos y de un solo uso (`SET NX`). Hay que escribir REANUDAR.
+  - Llama a la misma primitiva `resume` del motor y audita la identidad y el estado anterior (`brake_resumed_manually`).
+  - No hay tool MCP para destrabar el freno: un token MCP no abre el panel.
+- **Mensajes según el modo.** `WRITE_DISABLED` trae `details.reason`: `automatic_cooldown`, `probe_in_progress`, `manual_disable` o `manual_recovery_required`.
+  - Con la pausa vigente, trae además `paused_until` y `retry_after_seconds`, y la hora en la zona del perfil.
+  - En el remoto apunta al panel; en local, a `write resume`.
+  - `campus_get_write_status` suma `state`, `paused_until`, `retry_after_seconds`, `probe_in_progress`, ventana, cooldown, último fallo y última recuperación.
+- **Auditoría** de transiciones: `brake_engaged`, `brake_half_open`, `brake_recovered`, `brake_reengaged`, `brake_resumed_manually` y `brake_resume_noop`.
+
+**Límites:**
+- La huella de un fallo de verificación (`sin_efecto`) no distingue causas dentro del mismo objetivo.
+- El lease de 15 minutos supone que una ejecución termina antes. Si se interrumpe, la siguiente prueba espera a que venza.
+
+**Tests:**
+- `write-brake.test.ts` (18): apertura por 7.200 s, 1:59:59 frente a 2:00, prueba verificada y fallida, turno ocupado y lease vencido, error previo que suelta el turno, resultados inciertos, reinicio y cambio de día, interruptor manual y `resume`, migración, estado dañado, mismo objetivo frente a objetivos distintos, ventana de 15 minutos, errores previos a emitir, 403 de la subida sin filtrar el cuerpo ni reintentar, mismo PDF tres veces, CAS con dos instancias, una sola prueba entre tres instancias y KV caído.
+- `remote-write.test.ts` (4 nuevos): mensaje remoto con el panel, reanudar con confirmación y auditoría, formulario no reusable, interruptor que sigue apagado, y rechazos sin sesión, con otro GitHub, por GET, con formulario inválido o vencido, o con un token MCP.
+
+## ADR-135 · Historial de entregas
+
+**Fecha:** 2026-11-16 · **Estatus:** adoptada; implementación con pruebas sintéticas, validación real parcial · **Origen:** directiva del dueño (historial de entregas). `campus_get_submission` y `campus_get_submission_status` sólo conocen la **última modificación**: una entrega enviada en término y editada después del vencimiento figuraba con `late: true`. Hacía falta saber cuándo se registró el primer envío y compararlo con el vencimiento del participante.
+
+**Decisión:**
+- **Lectura nueva, `campus_get_submission_history`.** Es de sólo lectura y recibe `course_id`, `course_module_id` (CMID de la tarea) y `participant_id`, más `cursor` y `limit` para paginar la cronología. Exige rol docente en el curso (ADR-122). Está en los dos perfiles docentes (`udesa-docente` y `docente-completo`) porque `registerReadTools` los comparte. No hay capacidad nueva: usa `read_course_report` (web) y las de entregas. El CMID se resuelve contra `mod_assign_get_assignments`. Si no es una tarea, devuelve `UNSUPPORTED_CONTENT`; si no está en el curso, `RESOURCE_OUT_OF_SCOPE`. Un participante ajeno a la tarea da `RESOURCE_OUT_OF_SCOPE`.
+- **Lector compartido del registro.** El CSV de `report/log` (`readCourseLog` y `courseLogParams` en `CampusService`) lo lee el mismo código para `campus_get_course_report(kind=logs)` y para el historial: mismo transporte, capacidad, parseo (`parseLogCsv`) y errores. El hash de filtros de los cursores existentes no cambia. Cada consulta hace dos descargas:
+  - **Del participante:** `modid` + `user`, el filtro nativo por actor.
+  - **De la actividad:** sólo `modid`.
+  - Las dos con `modaction=cud` y sin fecha, o sea con todo lo que el Campus conserva.
+- **Atribución sólo por ID.** Los eventos de la descarga del participante cuentan si la descripción (Moodle la escribe en inglés y con IDs) no la contradice. Si nombra otro actor, otro usuario afectado u otra actividad, el evento es inconsistente y no se usa. Una acción de otra persona cuenta como delegada sólo si la descripción trae `for the user with id '<participante>'`, y se marca `operator: otro_usuario` con su ID. Una acción ajena sobre alguien no identificable por ID, como un docente que envía por un alumno (Moodle no pone el ID en esa descripción), queda **no atribuible**: nunca es el primer envío y bloquea `late`. Las acciones propias de otros participantes se ignoran y se cuentan. Nunca se compara por nombre visible.
+- **Tabla de etiquetas exactas.** El par componente + evento se compara en español e inglés, tras normalizar espacios repetidos, NFC y un punto final. Clases:
+  - `envio`.
+  - Guardados de contenido: `carga_archivo`, `guardado_texto`, `creacion_contenido` y `actualizacion_contenido`.
+  - Cambios del registro: `creacion_registro`, `cambio_estado`, `nuevo_intento` y `eliminacion`.
+  - Del trámite: `declaracion_aceptada`, `prorroga`, `bloqueo`, `calificacion`, `excepcion_fechas`, `configuracion_actividad`, `comentario` y `vista`.
+
+  Una etiqueta desconocida queda `desconocido`: nunca es un envío y bloquea `late`. Cada evento lleva `label.evidence`. `export_real` marca lo visto en el sandbox. `fuente_moodle` marca las cadenas inglesas de `mod/assign` y de `assignsubmission_file`/`onlinetext` en MOODLE_405_STABLE. `sin_confirmar` marca el resto de las españolas, y su uso agrega un aviso. La creación de la actividad se reconoce por la plantilla de la descripción, no por la etiqueta: en el Campus, el evento de creación figura como «Módulo del curso visto».
+- **Zona horaria verificada por ancla.** El export muestra la hora en la zona del perfil del Campus, que no tiene por qué coincidir con la del perfil del MCP ni con la del filtro por día. Se usa la zona del perfil sólo si el último cambio atribuible del registro coincide con el `timemodified` de `mod_assign_get_submission_status`: ±2 s, o dentro del minuto si el export no trae segundos. Que un evento sea el último no depende del desplazamiento, así que otra zona no puede coincidir por azar. La misma ancla decide entre día/mes y mes/día cuando el export es en inglés. Sin ancla (no hay registro de entrega, sin crearlo: ADR-051) o sin coincidencia:
+  - `iso`/`utc` quedan en `null` y se conserva `time_text`.
+  - `timing` es `unknown`.
+  - No se asume ART ni se inventan segundos.
+
+  Las horas locales inexistentes o repetidas por cambio de horario no dan un instante.
+- **Primer envío.** Es el primer evento `envio` atribuible en orden cronológico. El orden usa la hora normalizada y, dentro del mismo segundo, el sentido observado de la descarga. El primer guardado de contenido va aparte (`first_content_save_observed`) y nunca reemplaza al envío. También se devuelven el último cambio, los conteos y la cronología. No se infiere el número de intento.
+- **Vencimiento aplicable.** Sale de `effectiveDates`, es decir de `mod_assign_get_participant` con overrides y la prórroga que informa Moodle. La fecha de corte se informa aparte y no se usa. La comparación es contra el vencimiento consultado hoy (`compared_against: vencimiento_efectivo_actual`). Si después del envío hubo prórrogas, excepciones o cambios de configuración, `may_have_changed_after_submission` vale `true`.
+- **`timing`:**
+  - `on_time`: el intervalo compatible del primer envío termina a la hora límite o antes (23:59:00 contra 23:59:00 es en término).
+  - `late`: el primer envío empieza después del vencimiento (23:59:03 es tarde) **y** se cumplen tres condiciones:
+    - El registro de la actividad está completo y prueba la cobertura previa, con la creación de la actividad o un evento conservado anterior a la apertura. Se supone que la retención borra por antigüedad.
+    - No hay candidatos no atribuibles ni desconocidos antes del envío.
+    - No hay horas ilegibles.
+  - `unknown`: en cualquier otro caso. Si se puede, se devuelve la diferencia observada (`observed_difference`, en segundos mínimos y máximos).
+  - `no_due_date`: sólo cuando Moodle confirma que no hay vencimiento.
+
+  Un estado actual sin envío no se convierte en una afirmación sobre el pasado.
+- **Cobertura y errores.** Sesión web ausente o vencida, permiso denegado y CSV inválido conservan su error (`AUTH_REQUIRED`, `MOODLE_PERMISSION_DENIED`, `UNEXPECTED_RESPONSE`), también en la segunda descarga. Sólo el tope de 20.000 filas de la descarga de la actividad degrada a cobertura parcial: no se afirma `late` y `coverage.complete` vale `false`. Los resúmenes se calculan sobre todo lo recuperado, no sobre la página. El cursor está atado a curso, CMID, participante y límite.
+- **Privacidad.** No se devuelven IP, nombres, descripciones crudas, archivos ni texto de entregas. Las descripciones sólo se usan para extraer IDs. Las tareas con corrección anónima dan `POLICY_DENIED` y las grupales `UNSUPPORTED_CONTENT`, las dos sin leer registros. En una tarea grupal nunca se adjudica un evento a todos los integrantes. Cada consulta deja dos eventos «reporte visto» a nombre del docente.
+- **Contratos intactos.** `campus_get_submission` y `campus_get_submission_status` no cambian. Sus descripciones ahora aclaran que `modified`, `last_modified` y `late` usan la última modificación, y remiten al historial. No hay búsquedas masivas ni lectura web en las consultas de estado.
+
+**Límites:**
+- Fuera de las confirmadas, las etiquetas españolas de envío, guardado, creación y cambio de estado salen de la traducción conocida, no de un export real: en el sandbox no había entregas. Si alguna no coincide con el paquete de idioma del Campus, esos eventos quedan `desconocido` y el resultado es `unknown`, nunca un envío falso. Hay que confirmarlas con un export anonimizado.
+- La verificación de zona depende de que `timemodified` corresponda al último cambio registrado. Un cambio que no deja evento (por ejemplo, de otro proceso) deja la zona sin verificar y `timing` en `unknown`.
+- La cobertura previa supone que la retención borra por antigüedad. El CSV no informa la retención.
+- Las acciones delegadas sin el ID del participante en la descripción (envío por otro) no se pueden atribuir.
+- Tareas grupales y anónimas: no soportadas en esta versión.
+- Dos descargas por consulta. En cursos muy grandes, la de la actividad puede superar el tope.
+
+**Tests:**
+- `submission-history.test.ts` (22):
+  - Envío 23:55 y edición 00:30.
+  - Registro creado el día anterior, con guardado a las 00:29:16 y envío a las 00:29:19.
+  - 23:59:00 y 23:59:03 frente a 23:59:00, con y sin cobertura previa y con un evento anterior a la apertura.
+  - Sin evento explícito.
+  - Historial truncado por el tope de filas.
+  - Prórroga distinta del corte, prórroga sin fecha y sin vencimiento.
+  - Zona del export distinta de la del perfil.
+  - Export sin segundos, en el borde y antes.
+  - Sin registro de entrega (no se crea).
+  - Atribución: otro alumno, docente por otro sin ID, delegada con ID, etiqueta desconocida y descripción de otra actividad.
+  - Tarea grupal, anónima, actividad que no es tarea y participante ajeno, todas sin leer registros.
+  - CSV en español e inglés, descendente y ascendente, con el mismo resultado.
+  - Varias páginas, con resúmenes completos y cursor atado.
+  - Sesión vencida, permiso denegado (también en la segunda descarga), CSV inválido y sin rol docente.
+  - Tabla de etiquetas y parseo de horas, incluidos los cambios de horario.
+- `reports.test.ts` (1 nuevo): forma del export real (hora con segundos, descripción en inglés con IDs, sin IP). Las pruebas existentes de `kind=logs` cubren la refactorización del lector compartido.
+- `mcp.test.ts` (POL-05): la tool aparece en el catálogo de lectura con nombre `get` y anotaciones de sólo lectura.

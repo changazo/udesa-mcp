@@ -67,6 +67,7 @@ export const TOOL_NAMES = [
     "campus_list_assignments",
     "campus_get_submission_status",
     "campus_get_submission",
+    "campus_get_submission_history",
     "campus_list_events",
     "campus_list_resources",
     "campus_get_page",
@@ -104,7 +105,7 @@ export const READ_INSTRUCTIONS = `MCP de sólo lectura del Campus Virtual (Moodl
 - Los cursos disponibles salen de campus_list_courses (según el perfil: allowlist, cursos con rol docente o todos los cursos donde el usuario está matriculado, con su rol en cada uno). Los datos de terceros (entregas y notas de otros, participantes, grupos, intentos, asistencia, reportes, preguntas) exigen rol docente en ese curso: si no, POLICY_DENIED.
 - Entregas, notas, intentos, participantes, grupos y mensajes contienen datos personales: usalos sólo para la tarea pedida y no los copies a repositorios ni documentos compartidos.
 - Para avisos de un foro que no sea Avisos, pasá forum_id a campus_list_announcements; para buscar, campus_search_forums.
-- Para saber qué vence (y, con rol docente o superior, qué hay que corregir): campus_list_pending. La devolución de una entrega se pide con include_feedback en campus_get_submission.
+- Para saber qué vence (y, con rol docente o superior, qué hay que corregir): campus_list_pending. La devolución de una entrega se pide con include_feedback en campus_get_submission. Cuándo se envió por primera vez y si fue antes del vencimiento: campus_get_submission_history (las fechas de campus_get_submission son de última modificación).
 - Asistencia de clases pasadas: campus_get_attendance con include_history (por sesión y totales por alumno).
 - Leer una discusión completa marca sus posts como leídos en foros con seguimiento (marked_read); avoid_mark_read=true lo evita.`;
 
@@ -400,7 +401,7 @@ Para VER imágenes o páginas sin manejar archivos: campus_get_file_images.`,
         {
             title: "Estado de entregas de una tarea",
             description:
-                "Por participante: estado (new/draft/submitted/reopened), si requiere corrección, prórroga, última modificación y si fue tarde; con totales. Datos de estudiantes minimizados (sin email ni notas).",
+                "Por participante: estado (new/draft/submitted/reopened), si requiere corrección, prórroga, última modificación y si fue tarde; con totales. last_modified y late usan la ÚLTIMA MODIFICACIÓN de la entrega, no el primer envío (para eso, campus_get_submission_history). Datos de estudiantes minimizados (sin email ni notas).",
             inputSchema: {
                 course_id: courseId,
                 assignment_id: z.number().int().positive().describe("assignment_id de campus_list_assignments (no el course_module_id)."),
@@ -416,7 +417,7 @@ Para VER imágenes o páginas sin manejar archivos: campus_get_file_images.`,
         {
             title: "Entrega de un participante",
             description:
-                "Entrega de un participante en una tarea: estado, fechas, texto en línea, archivos (file_ref para campus_read_file) y comentarios. Con include_feedback, también la devolución del docente: nota, comentario de retroalimentación y archivos de devolución (incluido el PDF anotado).",
+                "Entrega de un participante en una tarea: estado, fechas, texto en línea, archivos (file_ref para campus_read_file) y comentarios. created es la creación del registro y modified (y late) la ÚLTIMA MODIFICACIÓN, no el primer envío: para cuándo se envió por primera vez, campus_get_submission_history. Con include_feedback, también la devolución del docente: nota, comentario de retroalimentación y archivos de devolución (incluido el PDF anotado).",
             inputSchema: {
                 course_id: courseId,
                 assignment_id: z.number().int().positive(),
@@ -427,6 +428,24 @@ Para VER imágenes o páginas sin manejar archivos: campus_get_file_images.`,
             annotations: ReadOnly,
         },
         (args) => run("campus_get_submission", () => deps.service.getSubmission(args)),
+    );
+
+    server.registerTool(
+        "campus_get_submission_history",
+        {
+            title: "Historial de una entrega (primer envío)",
+            description:
+                "Cuándo se registró el PRIMER ENVÍO explícito de un participante en una tarea y si fue antes de su vencimiento efectivo (con prórroga o excepción que confirme Moodle; la fecha de corte no cuenta), aunque después haya editado. Lee el registro estándar del Campus (requiere sesión web): separa creación del registro, guardados de contenido (archivo/texto), envíos, cambios de estado y ediciones posteriores. timing: on_time, late (sólo con el período previo cubierto y sin candidatos ambiguos), unknown (falta zona, precisión, historial o atribución) o no_due_date. Atribuye sólo por ID, nunca por nombre; tareas grupales no soportadas. Sin IP, nombres ni texto de la entrega. Leerlo registra un evento «reporte visto».",
+            inputSchema: {
+                course_id: courseId,
+                course_module_id: z.number().int().positive().describe("course_module_id de la tarea (no el assignment_id)."),
+                participant_id: z.number().int().positive().describe("participant_id de campus_get_submission_status."),
+                cursor: z.string().max(512).optional().describe("Siguiente página de la cronología (los resúmenes ya cubren todo)."),
+                limit: z.number().int().min(1).max(200).optional().describe("Eventos de cronología por página (50 por defecto)."),
+            },
+            annotations: ReadOnly,
+        },
+        (args) => run("campus_get_submission_history", () => deps.service.getSubmissionHistory(args)),
     );
 
     server.registerTool(

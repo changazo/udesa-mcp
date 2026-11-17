@@ -102,7 +102,8 @@ export interface ItemResult {
     item_id: string;
     outcome: ItemOutcome;
     moodle_ids: Record<string, number>;
-    error: { code: string; message: string; moodle_errorcode: string | null } | null;
+    /** stage/http_status (ADR-134): dónde falló, para el diagnóstico y la huella del freno. */
+    error: { code: string; message: string; moodle_errorcode: string | null; stage?: string | null; http_status?: number | null } | null;
     verification: { checked: string[]; differences: Difference[]; note: string | null };
 }
 

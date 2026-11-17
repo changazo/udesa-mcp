@@ -64,7 +64,7 @@ Escrituras (perfil de escritura, p. ej. udesa-docente-escritura; ver docs/PROCES
   campus write log     --profile <id> [--since AAAA-MM-DD]
   campus write disable --profile <id>   # interruptor general (las lecturas siguen)
   campus write enable  --profile <id>   # requiere terminal
-  campus write resume  --profile <id>   # reactiva tras el freno por fallos (requiere terminal)
+  campus write resume  --profile <id>   # libera el freno por fallos antes de que venza su pausa de 2 h (requiere terminal; en el remoto: /admin/escrituras)
 
 Opciones comunes: --profile-file <ruta> en lugar de --profile; --state-dir <ruta> en lugar de CAMPUS_STATE_DIR.
 El login lo ejecuta el humano en su propia terminal; las credenciales nunca van por argumentos.`;
@@ -690,9 +690,14 @@ async function writeMain(cmd: string, sub: string | undefined, arg: string | und
                 err("No se cambió nada.");
                 return 1;
             }
-            if (sub === "enable") await app.engine.setSwitch(false, "cli");
-            else await app.engine.resume("cli");
-            out(sub === "enable" ? "Escrituras habilitadas (sigue valiendo la doble llave del servidor)." : "Freno liberado: contador de fallos en cero.");
+            if (sub === "enable") {
+                await app.engine.setSwitch(false, "cli");
+                out("Escrituras habilitadas (sigue valiendo la doble llave del servidor).");
+                return 0;
+            }
+            const r = await app.engine.resume("cli");
+            out(r.result === "no_brake" ? "No había freno: no se cambió nada." : "Freno liberado: contador de fallos en cero.");
+            if (r.disabled) out("Ojo: el interruptor manual sigue APAGADO (campus write enable para encenderlo).");
             return 0;
         }
         default:

@@ -19,7 +19,7 @@ const REFRESH_TTL = 30 * 86400;
 const CODE_TTL = 120;
 const FLOW_TTL = 600;
 
-export type TokenKind = "client" | "authreq" | "ghstate" | "code" | "access" | "refresh" | "approver" | "approveform";
+export type TokenKind = "client" | "authreq" | "ghstate" | "code" | "access" | "refresh" | "approver" | "approveform" | "adminform";
 
 export interface AuthRequest {
     client_id: string;
@@ -264,6 +264,23 @@ export class TokenSigner {
 
     async signApproveForm(planId: string, planHash: string, sub: string): Promise<string> {
         return this.sign("approveform", { plan_id: planId, plan_hash: planHash, sub }, FLOW_TTL);
+    }
+
+    // --- Panel de escrituras (ADR-134): mismo dueño y misma sesión del aprobador ---
+
+    async signAdminState(nonce: string): Promise<string> {
+        return this.sign("ghstate", { admin: "escrituras", nonce }, FLOW_TTL);
+    }
+
+    /** Formulario de reanudar: atado al dueño y de UN solo uso (jti, consumido en el almacén). */
+    async signAdminForm(sub: string, jti: string): Promise<string> {
+        return this.sign("adminform", { sub, jti, action: "resume_brake" }, FLOW_TTL);
+    }
+
+    async verifyAdminForm(token: string, sub: string): Promise<string> {
+        const p = await this.verify("adminform", token);
+        if (p.sub !== sub || p.action !== "resume_brake" || typeof p.jti !== "string" || !/^[A-Za-z0-9_-]{16,64}$/.test(p.jti)) throw new OAuthError("invalid_request", "Formulario del panel inválido.");
+        return p.jti;
     }
 
     async verifyApproveForm(token: string, planId: string, sub: string): Promise<string> {

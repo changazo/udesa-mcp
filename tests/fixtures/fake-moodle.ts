@@ -154,7 +154,7 @@ export class FakeMoodle {
     reviewBlockedNow = false;
     /** Archivos extra servidos por pluginfile (ruta → contenido), p. ej. capítulos de libro. */
     readonly extraFiles = new Map<string, string | Uint8Array>();
-    /** webservice/upload.php (borrador del usuario); sin handler, 404. */
+    /** webservice/upload.php (borrador del usuario); sin handler, 404. Puede devolver un Response propio. */
     upload: ((form: FormData) => unknown | Promise<unknown>) | null = null;
     delayMs = 0;
 
@@ -171,7 +171,9 @@ export class FakeMoodle {
         if (url.pathname === "/webservice/upload.php") {
             if (!this.upload) return new Response("no", { status: 404 });
             const form = await new Request(url, { method: "POST", body: init?.body as BodyInit }).formData();
-            return json(await this.upload(form));
+            const out = await this.upload(form);
+            // Un Response se devuelve tal cual (p. ej. un 403 del Campus con una página HTML).
+            return out instanceof Response ? out : json(out);
         }
         if (url.pathname.startsWith("/webservice/pluginfile.php/")) return this.pluginfile(url);
         return this.web.handle(url, init);

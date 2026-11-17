@@ -1,7 +1,8 @@
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CampusError } from "../errors.js";
 import { redact } from "../util/redact.js";
+import type { FailureRecord, FailureScope } from "./brake.js";
 import type { StoredPlan } from "./plan.js";
 
 /**
@@ -15,15 +16,26 @@ import type { StoredPlan } from "./plan.js";
  */
 
 const PLAN_ID = /^pl_[a-z2-7]{16}$/;
+const STATE_LOCK_STALE_MS = 30_000;
 
 export interface WriteSwitchState {
     disabled: boolean;
     changed_at: string | null;
-    /** Freno ante fallos (§5.8): 3 resultados sin_efecto o rechazado seguidos pausan las escrituras. */
+    /** Freno ante fallos (ADR-134; el estado efectivo lo deriva `brakeView` en brake.ts). */
     paused: boolean;
     paused_at: string | null;
+    /** Fin del cooldown automático. null con paused=true y sin paused_at = sólo recuperación manual. */
+    paused_until: string | null;
     paused_reason: string | null;
+    /** Fallos distintos en la ventana (compatibilidad: antes, fallos seguidos). */
     consecutive_failures: number;
+    /** Generación del ciclo de freno: una prueba de un ciclo anterior no puede cerrar uno nuevo. */
+    brake_cycle: number;
+    /** Turno de prueba half_open (lease con vencimiento). */
+    probe: { id: string; cycle: number; until: string } | null;
+    failures: FailureRecord[];
+    last_failure: { at: string; scope: FailureScope; stage: string | null; code: string | null; http_status: number | null } | null;
+    last_recovery: { at: string; via: string } | null;
     /** Contadores del día (en la zona del perfil). */
     day: string | null;
     actions_today: number;
@@ -43,8 +55,14 @@ export const EMPTY_STATE: WriteSwitchState = {
     changed_at: null,
     paused: false,
     paused_at: null,
+    paused_until: null,
     paused_reason: null,
     consecutive_failures: 0,
+    brake_cycle: 0,
+    probe: null,
+    failures: [],
+    last_failure: null,
+    last_recovery: null,
     day: null,
     actions_today: 0,
     messages_today: 0,
@@ -63,12 +81,19 @@ export interface WriteStore {
     release(planId: string): Promise<void>;
     isClaimed(planId: string): Promise<boolean>;
     listPlans(): Promise<StoredPlan[]>;
+    /** Falla cerrado: un estado ilegible o un almacén caído es un error, nunca «sin freno». */
     readState(): Promise<WriteSwitchState>;
-    writeState(s: WriteSwitchState): Promise<void>;
+    /**
+     * Transición ATÓMICA del estado (ADR-134): `fn` recibe el estado actual y devuelve el nuevo, o null para
+     * no cambiar nada. Si otro proceso o instancia lo cambió en el medio, se vuelve a leer y se reintenta.
+     */
+    updateState(fn: (s: WriteSwitchState) => WriteSwitchState | null): Promise<{ before: WriteSwitchState; after: WriteSwitchState; changed: boolean }>;
     audit(event: Record<string, unknown>): Promise<void>;
     readAudit(): Promise<Record<string, unknown>[]>;
     saveApproval(planId: string, a: WebApproval): Promise<boolean>;
     loadApproval(planId: string): Promise<WebApproval | null>;
+    /** Marca de un solo uso (formularios del panel, ADR-134): true sólo la primera vez. */
+    consumeOnce(id: string, ttlSeconds: number): Promise<boolean>;
     /** Bytes de un archivo entregado por el cliente (ChatGPT), por su sha256, con vencimiento. */
     putBlob(sha256: string, data: Buffer, ttlSeconds: number): Promise<void>;
     /** null si no existe o ya venció. */
@@ -84,6 +109,22 @@ const SHA256 = /^[0-9a-f]{64}$/;
 function checkSha(sha256: string) {
     if (!SHA256.test(sha256)) throw new CampusError("RESOURCE_OUT_OF_SCOPE", "Identificador de archivo inválido.");
 }
+
+/** Estado guardado → estado completo; uno ilegible es un error (falla cerrado). */
+function parseState(raw: string): WriteSwitchState {
+    let v: unknown;
+    try {
+        v = JSON.parse(raw);
+    } catch {
+        v = null;
+    }
+    if (!v || typeof v !== "object" || Array.isArray(v)) throw new CampusError("SERVICE_UNAVAILABLE", "El estado de escrituras está dañado: no se escribe hasta revisarlo.");
+    const s = { ...EMPTY_STATE, ...(v as Partial<WriteSwitchState>) };
+    if (!Array.isArray(s.failures)) s.failures = [];
+    return s;
+}
+
+const UPDATE_ATTEMPTS = 50;
 
 function parseAuditLines(lines: string[]): Record<string, unknown>[] {
     const out: Record<string, unknown>[] = [];
@@ -184,15 +225,47 @@ export class FileWriteStore implements WriteStore {
     }
 
     async readState(): Promise<WriteSwitchState> {
+        let raw: string;
         try {
-            return { ...EMPTY_STATE, ...(JSON.parse(readFileSync(this.stateFile, "utf8")) as Partial<WriteSwitchState>) };
-        } catch {
-            return { ...EMPTY_STATE };
+            raw = readFileSync(this.stateFile, "utf8");
+        } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === "ENOENT") return { ...EMPTY_STATE };
+            throw new CampusError("SERVICE_UNAVAILABLE", "No se pudo leer el estado de escrituras.");
         }
+        return parseState(raw);
     }
 
-    async writeState(s: WriteSwitchState): Promise<void> {
-        this.writeAtomic(this.stateFile, JSON.stringify(s, null, 2));
+    /**
+     * Candado entre procesos (servidor y CLI): `write-state.lock` con O_EXCL. Uno abandonado (proceso
+     * caído) se toma después de STATE_LOCK_STALE_MS.
+     */
+    async updateState(fn: (s: WriteSwitchState) => WriteSwitchState | null) {
+        const lock = join(this.location, "write-state.lock");
+        mkdirSync(this.location, { recursive: true });
+        for (let i = 0; ; i++) {
+            try {
+                closeSync(openSync(lock, "wx", 0o600));
+                break;
+            } catch {
+                let stale = false;
+                try {
+                    stale = Date.now() - statSync(lock).mtimeMs > STATE_LOCK_STALE_MS;
+                } catch {
+                    /* lo soltaron recién */
+                }
+                if (stale) rmSync(lock, { force: true });
+                else if (i > 500) throw new CampusError("SERVICE_UNAVAILABLE", "El estado de escrituras está tomado por otro proceso.");
+                else await new Promise((r) => setTimeout(r, 10));
+            }
+        }
+        try {
+            const before = await this.readState();
+            const next = fn(before);
+            if (next) this.writeAtomic(this.stateFile, JSON.stringify(next, null, 2));
+            return { before, after: next ?? before, changed: !!next };
+        } finally {
+            rmSync(lock, { force: true });
+        }
     }
 
     /** La red de seguridad `redact` corre igual, aunque nada sensible debería llegar acá. */
@@ -226,6 +299,19 @@ export class FileWriteStore implements WriteStore {
         } catch (e) {
             if (e instanceof CampusError) throw e;
             return null;
+        }
+    }
+
+    /** Local: sin vencimiento (el panel es del remoto; acá sólo por completitud). */
+    async consumeOnce(id: string, _ttlSeconds: number): Promise<boolean> {
+        if (!/^[A-Za-z0-9_-]{16,64}$/.test(id)) return false;
+        const dir = join(this.location, "once");
+        mkdirSync(dir, { recursive: true });
+        try {
+            closeSync(openSync(join(dir, id), "wx", 0o600));
+            return true;
+        } catch {
+            return false;
         }
     }
 
@@ -281,6 +367,9 @@ export class UpstashKv implements KvClient {
     }
 }
 
+/** Compare-and-set: escribe ARGV[2] sólo si la clave vale ARGV[1] ("" = no existe). */
+export const CAS_SCRIPT = "local c = redis.call('GET', KEYS[1]) if (c == false and ARGV[1] == '') or c == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2]) return 1 end return 0";
+
 /** Redis mínimo en memoria con la semántica que usa KvWriteStore (tests). */
 export class MemoryKv implements KvClient {
     readonly data = new Map<string, string | string[] | Map<string, number>>();
@@ -335,6 +424,17 @@ export class MemoryKv implements KvClient {
                 const sorted = [...z.entries()].sort((a, b) => a[1] - b[1]).map(([m]) => m);
                 const end = Number(rest[1]);
                 return sorted.slice(Number(rest[0]), end < 0 ? sorted.length + end + 1 : end + 1);
+            }
+            case "EVAL": {
+                // Sólo el compare-and-set (atómico: sin await en el medio).
+                if (key !== CAS_SCRIPT) throw new Error("MemoryKv: script no admitido");
+                const [, k, old, next] = rest as [string, string, string, string];
+                const cur = this.data.get(k);
+                if ((cur === undefined && old === "") || cur === old) {
+                    this.data.set(k, next);
+                    return 1;
+                }
+                return 0;
             }
             case "EXPIRE":
                 this.ttl.set(key, Number(rest[0]));
@@ -409,11 +509,22 @@ export class KvWriteStore implements WriteStore {
 
     async readState(): Promise<WriteSwitchState> {
         const raw = await this.kv.cmd(["GET", this.k("state")]);
-        return typeof raw === "string" ? { ...EMPTY_STATE, ...(JSON.parse(raw) as Partial<WriteSwitchState>) } : { ...EMPTY_STATE };
+        return typeof raw === "string" ? parseState(raw) : { ...EMPTY_STATE };
     }
 
-    async writeState(s: WriteSwitchState): Promise<void> {
-        await this.kv.cmd(["SET", this.k("state"), JSON.stringify(s)]);
+    /** Compare-and-set con un script de Redis (Upstash lo admite por REST). Sin TTL en la clave de estado. */
+    async updateState(fn: (s: WriteSwitchState) => WriteSwitchState | null) {
+        for (let i = 0; i < UPDATE_ATTEMPTS; i++) {
+            const raw = await this.kv.cmd(["GET", this.k("state")]);
+            const before = typeof raw === "string" ? parseState(raw) : { ...EMPTY_STATE };
+            const next = fn(before);
+            if (!next) return { before, after: before, changed: false };
+            const ok = await this.kv.cmd(["EVAL", CAS_SCRIPT, 1, this.k("state"), typeof raw === "string" ? raw : "", JSON.stringify(next)]);
+            if (Number(ok) === 1) return { before, after: next, changed: true };
+            // Otra instancia ganó: espera corta con azar para no chocar de nuevo.
+            await new Promise((r) => setTimeout(r, Math.random() * 10 * (i + 1)));
+        }
+        throw new CampusError("SERVICE_UNAVAILABLE", "El estado de escrituras cambia demasiado seguido: no se pudo actualizar.");
     }
 
     async audit(event: Record<string, unknown>): Promise<void> {
@@ -434,6 +545,11 @@ export class KvWriteStore implements WriteStore {
         checkId(planId);
         const raw = await this.kv.cmd(["GET", this.k("approval", planId)]);
         return typeof raw === "string" ? (JSON.parse(raw) as WebApproval) : null;
+    }
+
+    async consumeOnce(id: string, ttlSeconds: number): Promise<boolean> {
+        if (!/^[A-Za-z0-9_-]{16,64}$/.test(id)) return false;
+        return (await this.kv.cmd(["SET", this.k("once", id), "1", "NX", "EX", ttlSeconds])) === "OK";
     }
 
     /**

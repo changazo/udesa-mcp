@@ -17,7 +17,7 @@ Los **datos de terceros** exigen rol docente o superior en ESE curso: `editingte
 
 | Herramienta | Sin rol docente o superior |
 |---|---|
-| `campus_get_submission_status`, `campus_get_submission` y archivos de entregas o devoluciones | Denegado |
+| `campus_get_submission_status`, `campus_get_submission`, `campus_get_submission_history` y archivos de entregas o devoluciones | Denegado |
 | `campus_get_grades` | Sólo tus notas; con `participant_id` de otro, denegado. Si el curso oculta el libro a los estudiantes, `MOODLE_PERMISSION_DENIED` con ese motivo |
 | `campus_list_participants`, `campus_list_groups` | Denegado |
 | `campus_get_quiz_attempts`, `campus_get_quiz_attempt` | Tus intentos sí, con lo que la configuración de revisión del cuestionario permita (ADR-123); los de otro, denegado |
@@ -38,7 +38,7 @@ Las **escrituras** exigen rol de profesor, gestor o superior (`editingteacher`, 
 | [2. Cursos y contenido](#2-cursos-y-contenido) | `campus_list_courses`, `campus_get_course`, `campus_get_course_overview`, `campus_list_resources`, `campus_get_page`, `campus_get_activity_content`, `campus_get_course_updates` |
 | [3. Archivos](#3-archivos) | `campus_read_file`, `campus_get_original_file`, `campus_get_file_images` |
 | [4. Foros y avisos](#4-foros-y-avisos) | `campus_list_forums`, `campus_list_announcements`, `campus_get_discussion`, `campus_search_forums` |
-| [5. Tareas y entregas](#5-tareas-y-entregas) | `campus_list_assignments`, `campus_get_submission_status`, `campus_get_submission` |
+| [5. Tareas y entregas](#5-tareas-y-entregas) | `campus_list_assignments`, `campus_get_submission_status`, `campus_get_submission`, `campus_get_submission_history` |
 | [6. Cuestionarios](#6-cuestionarios) | `campus_list_quizzes`, `campus_get_quiz_attempts`, `campus_get_quiz_attempt` |
 | [7. Calificaciones](#7-calificaciones) | `campus_get_grades` |
 | [8. Personas y grupos](#8-personas-y-grupos) | `campus_list_participants`, `campus_list_groups` |
@@ -110,14 +110,54 @@ Los `file_ref` salen de `campus_get_course`, `campus_list_resources`, `campus_li
 | Herramienta | Para qué | Parámetros | Moodle |
 |---|---|---|---|
 | `campus_list_assignments` | Tareas: fechas (desde, vencimiento, corte, corrección), tipo de entrega, grupal o anónima, consigna | `course_id`\* | `mod_assign_get_assignments` |
-| `campus_get_submission_status` | Por participante: estado, si requiere corrección, prórroga, última modificación, si fue tarde; con totales 👤 | `course_id`\*, `assignment_id`\*, `group_id` | `mod_assign_list_participants`, `mod_assign_get_submissions` |
-| `campus_get_submission` | Una entrega: estado, fechas, texto en línea, archivos y comentarios. Con `include_feedback`, la devolución del docente: nota, comentario de retroalimentación y archivos de devolución, incluido el PDF anotado (también como `file_ref`) 👤 | `course_id`\*, `assignment_id`\*, `participant_id`\*, `text_offset`, `include_feedback` | `mod_assign_list_participants` (guarda), `mod_assign_get_submission_status` o, sin entrega, `mod_assign_get_user_flags`; `core_comment_get_comments` |
+| `campus_get_submission_status` | Por participante: estado, si requiere corrección, prórroga, última modificación, si fue tarde (contra la **última modificación**, no el primer envío); con totales 👤 | `course_id`\*, `assignment_id`\*, `group_id` | `mod_assign_list_participants`, `mod_assign_get_submissions` |
+| `campus_get_submission` | Una entrega: estado, fechas (`created` = creación del registro; `modified` y `late` = **última modificación**), texto en línea, archivos y comentarios. Con `include_feedback`, la devolución del docente: nota, comentario de retroalimentación y archivos de devolución, incluido el PDF anotado (también como `file_ref`) 👤 | `course_id`\*, `assignment_id`\*, `participant_id`\*, `text_offset`, `include_feedback` | `mod_assign_list_participants` (guarda), `mod_assign_get_submission_status` o, sin entrega, `mod_assign_get_user_flags`; `core_comment_get_comments` |
 
 Sin `include_feedback` no se muestran ni la nota ni la devolución. Nunca se informa quién calificó. Si la tarea se califica con **rúbrica o guía de evaluación**, la devolución trae `advanced_grading`: por criterio, los niveles con puntaje y el elegido (rúbrica) o el puntaje sobre el máximo (guía), con las observaciones. Sale del HTML que Moodle arma para mostrar la nota (ADR-042); si su estructura no se reconoce, `recognized=false` con el texto, nunca una rúbrica vacía.
 
 `campus_get_submission` incluye `effective_dates`: fechas base de la tarea, fechas del participante con los overrides de usuario o grupo que calcula Moodle (`mod_assign_get_participant`), prórroga y fecha aplicable. `status` distingue `ok`, `participante_filtrado` (un filtro de la tabla de calificación del docente lo excluye), `fuera_de_alcance` y `no_disponible`. `late` sólo se clasifica con una fecha efectiva resuelta; si no, es `null`. Si Moodle indica prórroga sin informar su fecha, la fecha aplicable queda desconocida.
 
 Si el participante no tiene registro de entrega, `campus_get_submission` devuelve `submission_record: false`, `status: null` y un aviso, sin consultar `mod_assign_get_submission_status`: esa lectura crearía una entrega vacía (ADR-052). Prórroga y bloqueo salen igual, de `mod_assign_get_user_flags`.
+
+### Historial de una entrega: `campus_get_submission_history` (ADR-135)
+
+| Herramienta | Para qué | Parámetros | Fuente |
+|---|---|---|---|
+| `campus_get_submission_history` | Cuándo se registró el **primer envío** de un participante y si fue antes de **su** vencimiento efectivo, aunque después haya editado. Separa creación del registro, guardados de contenido, envíos, cambios de estado y ediciones posteriores, con una cronología paginada 👤 | `course_id`\*, `course_module_id`\* (CMID de la tarea), `participant_id`\*, `cursor`, `limit` | Sesión web: `report/log` (CSV), dos descargas por consulta con el lector compartido de `campus_get_course_report`; REST: `mod_assign_get_assignments`, `mod_assign_list_participants`, `mod_assign_get_submission_status` (sólo si hay registro) o `mod_assign_get_user_flags`, `mod_assign_get_participant` |
+
+Tres momentos distintos que no hay que confundir:
+
+| Momento | Qué es | Dónde se ve |
+|---|---|---|
+| Creación | Moodle crea el registro de la entrega (estado `new`), a veces sin contenido y días antes; también la primera vez que se guarda texto o archivo | `created` en `campus_get_submission`; `creacion_registro` / `creacion_contenido` en el historial |
+| Envío | El participante (o alguien por él, con su ID en el registro) envía la entrega. Sin botón «Enviar» (borradores desactivados), guardar también envía | `first_submission_observed` (evento `envio`) en el historial |
+| Modificación | Cualquier cambio posterior: guardar texto, subir archivos, revertir a borrador, nuevo intento | `modified` en `campus_get_submission` y `campus_get_submission_status` (última); `last_change_observed` en el historial |
+
+Ejemplo: «¿Ana entregó el TP1 a tiempo? Después lo corrigió». Pedí `campus_get_submission_history` con el `course_module_id` de la tarea y el `participant_id` de `campus_get_submission_status`. Respuesta abreviada:
+
+```json
+{
+  "first_submission_observed": { "kind": "envio", "time_text": "20/09/26, 23:55:00", "iso": "2026-09-20T23:55:00-03:00", "precision": "segundo", "attribution": { "operator": "participante" } },
+  "first_content_save_observed": { "kind": "creacion_contenido", "iso": "2026-09-20T23:54:58-03:00" },
+  "last_change_observed": { "kind": "guardado_texto", "iso": "2026-09-21T00:30:00-03:00" },
+  "applicable_due": { "due": { "local": "2026-09-20T23:59:00-03:00" }, "source": "mod_assign_get_participant", "compared_against": "vencimiento_efectivo_actual" },
+  "timing": { "result": "on_time", "observed_difference": { "min_seconds": -240, "max_seconds": -240 } },
+  "time_zone": { "verified": true }
+}
+```
+
+`campus_get_submission` diría `modified` = 00:30 y `late: true`: es la última modificación, no el envío.
+
+Reglas:
+
+- **Atribución sólo por ID.** Una descarga usa el filtro nativo de usuario (actor = participante); la otra, todos los cambios de la actividad, para acciones delegadas: un docente que actúa por el participante cuenta sólo si el registro trae el ID del participante como usuario afectado, y se marca `operator: otro_usuario` con su ID. Lo demás queda como no atribuible y nunca es el primer envío. Nunca se compara por nombre.
+- **Etiquetas exactas.** El CSV no trae el identificador del evento: se clasifica por el par componente + evento, en español e inglés. Una etiqueta desconocida nunca es un envío; `label.evidence` dice si la etiqueta se confirmó en un export real (`export_real`), sale de la fuente de Moodle 4.5 (`fuente_moodle`) o todavía no se confirmó (`sin_confirmar`).
+- **Zona horaria verificada.** El export muestra horas en la zona del perfil del Campus, que puede no ser la del perfil del MCP. Se verifica con un ancla: el último cambio del registro tiene que coincidir con la última modificación que informa Moodle. Sin verificación, `iso`/`utc` quedan en `null` (se conserva `time_text`) y `timing` es `unknown`. Sin segundos, la precisión es de minuto y sólo se decide si todo el minuto cae del mismo lado del vencimiento.
+- **`timing`.** `on_time`: envío explícito atribuible a la hora límite o antes (23:59:00 contra 23:59:00 es en término; 23:59:03 es tarde). `late`: el primer envío comprobado es posterior **y** el registro conserva el período previo (la creación de la actividad o eventos anteriores a la apertura), sin candidatos ambiguos ni horas ilegibles; si no, `unknown` con `observed_difference`. `no_due_date`: sólo si Moodle confirma que no hay vencimiento. El estado actual sin envío no se convierte en una afirmación sobre el pasado.
+- **Vencimiento.** El efectivo del participante según `mod_assign_get_participant` y la prórroga que informa Moodle; la fecha de corte se muestra aparte y no se usa. Es el vencimiento consultado hoy, no el vigente al momento del envío; si hubo prórrogas, excepciones o cambios de configuración después del envío, `may_have_changed_after_submission: true`.
+- **Cobertura.** Retención desconocida: `coverage.complete` significa que se recuperó todo lo disponible. Si el registro de la actividad supera el tope de filas, la cobertura queda parcial y no se afirma una tardanza. Sesión vencida, permiso denegado o CSV inválido son errores, nunca «sin eventos».
+- **No soportado.** Tareas grupales (`UNSUPPORTED_CONTENT`) y con corrección anónima (`POLICY_DENIED`), sin leer registros.
+- **Privacidad.** Sin IP, nombres, descripciones crudas, archivos ni texto de la entrega. Leerlo deja en el Campus un evento «reporte visto» a tu nombre.
 
 ## 6. Cuestionarios
 
@@ -311,7 +351,7 @@ Las intenciones tienen validaciones de distinto alcance; los escenarios nuevos p
 | `campus_get_plan(plan_id*)` | Lectura | Plan, estado y resultado | — |
 | `campus_list_write_actions(since)` | Lectura | Acciones ejecutadas, según la auditoría local (sin contenido) | — |
 | `campus_undo_action(action_id*)` | Lectura | Arma el plan de deshacer, que después se ejecuta con `campus_execute_plan` como cualquier plan | Exacto, compensación o ninguno, según la operación |
-| `campus_get_write_status` | Lectura | Interruptor, freno, límites del día, capacidades por curso y las de todos los cursos (`all_courses`, con los roles de escritura) | — |
+| `campus_get_write_status` | Lectura | Interruptor, freno, límites del día, capacidades por curso y las de todos los cursos (`all_courses`, con los roles de escritura). El freno (ADR-134) trae `state` (`closed`, `open`, `half_open` o `manual`), `paused_until` (y en hora local), `retry_after_seconds`, `probe_in_progress`, la ventana, el cooldown, el último fallo (por objetivo o sistémico, con etapa y HTTP) y la última recuperación (automática o manual) | — |
 | `campus_plan_announcement(course_id*, subject*, message*, message_format, forum_id, group_id, pin, attachments, subscribe)` | Lectura (plan) | Aviso nuevo en el foro de Avisos o en otro foro del curso. Markdown → HTML; grupo -1 (todos) o uno permitido; fijado sólo con la capacidad. Adjuntos: rutas locales absolutas indicadas por el humano (ADR-057). El plan muestra la suscripción, los posibles destinatarios y que el correo sale después de `maxeditingtime`. Suscripción del autor a la discusión: `subscribe` (por defecto no; ADR-098). Con el perfil actual, un foro con suscripción forzada o inicial (como Avisos) se rechaza porque mandaría correo a los participantes | R2 (R3 en un foro con suscripción forzada fuera del sandbox, si el perfil permite notificar). Deshacer: borrar la discusión (sin correo dentro de la ventana) |
 | `campus_plan_forum_reply(course_id*, discussion_id*, message*, message_format, reply_to_post_id, private, subject, attachments, subscribe)` | Lectura (plan) | Respuesta pública o privada, con adjuntos opcionales (ADR-057). La privada exige la capacidad (si no, Moodle la publicaría en abierto). No responde a respuestas privadas ni en discusiones bloqueadas. Suscripción del autor a la discusión: `subscribe` (por defecto no; ADR-098) | R2. Deshacer: borrar la respuesta |
 | `campus_plan_post_edit(course_id*, discussion_id*, post_id*, subject, message, message_format, subscribe)` | Lectura (plan) | Edita un post **propio** y muestra el antes y el después. Suscripción del autor a la discusión: `subscribe` (por defecto no; ADR-098) | R2. Deshacer: reeditar con el texto anterior (compensación) |

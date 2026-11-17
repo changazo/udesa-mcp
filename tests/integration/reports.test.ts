@@ -80,6 +80,14 @@ describe("registros del curso (§9.1)", () => {
         expect(() => parseLogCsv("a,b,c\n1,2,3")).toThrow(/9 columnas/);
         expect(parseLogCsv(LOG_CSV.split("\r\n")[0]!).events).toEqual([]); // tabla vacía válida
     });
+
+    it("forma del export real (Moodle 4.5, ADR-135): hora con segundos y descripción en inglés con IDs, sin IP", () => {
+        // Fila sintética con la forma observada en el sandbox: «dd/mm/aa, HH:MM:SS», componente y evento localizados.
+        const csv = [LOG_CSV.split("\r\n")[0]!, `"20/09/26, 23:55:00",Ana Sintética,-,"Tarea: TP1",Tarea,"Se ha visualizado el estado de la entrega.","The user with id '601' has viewed the submission status page for the assignment with course module id '9101'.",web,10.1.2.3`].join("\r\n");
+        const [e] = parseLogCsv(csv).events;
+        expect(e).toMatchObject({ time_text: "20/09/26, 23:55:00", component: "Tarea", event_name: "Se ha visualizado el estado de la entrega." });
+        expect(JSON.stringify(e)).not.toContain("10.1.2.3");
+    });
 });
 
 describe("participación (§9.2)", () => {

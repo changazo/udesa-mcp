@@ -267,11 +267,22 @@ Pedile al agente `campus_undo_action(action_id)`. Arma un plan de deshacer, que 
 |---|---|
 | Cortar todas las escrituras al instante (las lecturas siguen) | `node build/cli.js write disable --profile udesa-docente-escritura` |
 | Volver a habilitarlas (pide escribir HABILITAR; requiere terminal) | `node build/cli.js write enable --profile udesa-docente-escritura` |
-| Reanudar después del freno (3 resultados sin efecto o rechazados seguidos) | `node build/cli.js write resume --profile udesa-docente-escritura` |
+| Reanudar antes de tiempo después del freno (pide escribir REANUDAR) | `node build/cli.js write resume --profile udesa-docente-escritura` |
 | Ver qué se escribió | `node build/cli.js write log --profile udesa-docente-escritura --since <AAAA-MM-DD>` |
 | Estado, límites del día y capacidades (por curso y `all_courses`) | `node build/cli.js write status --profile udesa-docente-escritura` |
 
-Estos comandos actúan sobre el estado **local** (`%LOCALAPPDATA%\udesa-campus-mcp\…`). Las escrituras remotas (`/mcp-completo`, `/mcp-escritura`) guardan planes, interruptor, límites y auditoría en el KV de Upstash: para cortarlas, cambiá `CAMPUS_WRITE_TOKEN_VERSION` o quitá `CAMPUS_WRITE_ENABLED` en Vercel y redesplegá ([CONECTAR_CLIENTES.md](CONECTAR_CLIENTES.md#escrituras-remotas)).
+Estos comandos actúan sobre el estado **local** (`%LOCALAPPDATA%\udesa-campus-mcp\…`): `write resume` no destraba el remoto. Las escrituras remotas (`/mcp-completo`, `/mcp-escritura`) guardan planes, interruptor, límites y auditoría en el KV de Upstash: para cortarlas, cambiá `CAMPUS_WRITE_TOKEN_VERSION` o quitá `CAMPUS_WRITE_ENABLED` en Vercel y redesplegá ([CONECTAR_CLIENTES.md](CONECTAR_CLIENTES.md#escrituras-remotas)).
+
+### Freno ante fallos (ADR-134)
+
+Tres fallos **distintos** (`sin_efecto` o `rechazado_por_moodle`) en 15 minutos pausan las escrituras durante **2 horas**. Las lecturas siguen. El error `WRITE_DISABLED` trae `reason=automatic_cooldown`, la hora de reapertura en la zona del perfil y `retry_after_seconds`; `campus_get_write_status` muestra lo mismo en `brake`.
+
+- **Repetir el mismo intento fallido no cuenta de nuevo.** Tres rechazos del mismo archivo contra el mismo recurso cuentan como uno. Los errores previos a escribir (plan obsoleto o vencido, confirmación pendiente, política) no cuentan.
+- **Recuperación automática:** pasadas las 2 horas, la primera ejecución es una **prueba**. Si queda `aplicado_verificado`, el freno se cierra; con cualquier otro resultado, otra pausa de 2 horas. Mientras la prueba corre, las demás ejecuciones reciben `reason=probe_in_progress` sin escribir. La pausa nunca vuelve a ejecutar planes viejos.
+- **Recuperación administrativa (antes de las 2 horas):** en local, `write resume` (arriba). En el remoto, el panel **`/admin/escrituras`** ([REMOTO_VERCEL.md](REMOTO_VERCEL.md#mantenimiento)). Las dos sólo liberan el freno: no tocan el interruptor manual (`write disable`/`enable`), que nunca vence solo, ni los límites del día.
+- Ajustable por perfil en `write_policy.brake` (`failure_threshold`, `failure_window_seconds`, `cooldown_seconds`); sin la clave valen 3, 900 y 7200.
+
+**Un PDF que Moodle rechaza en la subida** (`stage: upload_draft`, HTTP 403): el problema suele estar en el archivo. Regeneralo (por ejemplo, abrilo e imprimilo con «Microsoft Print to PDF») y pedí un plan nuevo con el archivo nuevo. No siempre alcanza, y el MCP nunca convierte el archivo por su cuenta.
 
 - **Auditoría:** `%LOCALAPPDATA%\udesa-campus-mcp\profiles\udesa-docente-escritura\write-audit.jsonl`. Registra planes, confirmaciones, ejecuciones y deshaceres, sin tokens ni contenido de estudiantes; tus textos van como hash.
 - **Planes:** quedan en `plans\` del mismo directorio. Sirven para auditar y para deshacer.

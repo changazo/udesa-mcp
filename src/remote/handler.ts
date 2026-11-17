@@ -42,6 +42,9 @@ export interface RemoteDeps {
 
 const APPROVER_COOKIE = "__Host-campus_approver";
 const PLAN_PATH = /^\/aprobar\/(pl_[a-z2-7]{16})$/;
+const ADMIN_PATH = "/admin/escrituras";
+/** Un formulario del panel vale 10 minutos y una sola vez. */
+const ADMIN_FORM_TTL_S = 600;
 
 /**
  * Secretos del servidor de escritura remoto: el token de Moodle para el núcleo de lectura y una clave
@@ -165,7 +168,7 @@ export function createRemoteHandler(deps: RemoteDeps = {}): (req: Request) => Pr
                     store,
                     confirmer: new WebApprovalConfirmer(store),
                     downloadLinks: links,
-                    remote: { approvalUrl: (id) => `${res.config.baseUrl}/aprobar/${id}`, maxRisk: "R4" },
+                    remote: { approvalUrl: (id) => `${res.config.baseUrl}/aprobar/${id}`, maxRisk: "R4", adminUrl: `${res.config.baseUrl}${ADMIN_PATH}` },
                 });
                 wireAutoLogin(write.read.web, write.read.serverDeps);
             } catch (e) {
@@ -247,6 +250,13 @@ export function createRemoteHandler(deps: RemoteDeps = {}): (req: Request) => Pr
                 case "POST /":
                 case "DELETE /":
                     return cors(await mcp(s.signer, s.app, req, logger, "/"));
+                // Panel del freno de escrituras (ADR-134): sólo el dueño, con su GitHub.
+                case `GET ${ADMIN_PATH}`:
+                    if (!s.write) return json({ error: "not_found" }, 404);
+                    return await adminPage(s.cfg, s.signer, s.write, req, logger);
+                case `POST ${ADMIN_PATH}/reanudar`:
+                    if (!s.write) return json({ error: "not_found" }, 404);
+                    return await adminResume(s.signer, s.write, req, logger);
                 default: {
                     // Página de aprobación de escrituras (W5): /aprobar/<plan_id>.
                     const m = PLAN_PATH.exec(path);
@@ -365,7 +375,7 @@ async function githubCallback(
     if (!cookieNonce || !safeEqual(cookieNonce, String(st.nonce))) {
         return fail("Este login no se inició en este navegador. Volvé a conectar desde tu cliente.");
     }
-    if (typeof st.approve_plan === "string" && /^pl_[a-z2-7]{16}$/.test(st.approve_plan)) {
+    if (st.admin === "escrituras" || (typeof st.approve_plan === "string" && /^pl_[a-z2-7]{16}$/.test(st.approve_plan))) {
         // Login para la página de aprobación (W5): mismo dueño de GitHub, cookie propia de 8 h.
         const code = q.get("code");
         if (q.get("error") || !code || code.length > 256) return fail("No se completó el login con GitHub.");
@@ -375,7 +385,7 @@ async function githubCallback(
             logger.log("warn", "approver_login_denied", { reason: "github_user_not_allowed" });
             return fail("Esta cuenta de GitHub no está autorizada en este servidor privado.", 403);
         }
-        const res = clearCookie(redirect(new URL(`/aprobar/${st.approve_plan}`, cfg.baseUrl)));
+        const res = clearCookie(redirect(new URL(st.admin === "escrituras" ? ADMIN_PATH : `/aprobar/${String(st.approve_plan)}`, cfg.baseUrl)));
         res.headers.append("set-cookie", `${APPROVER_COOKIE}=${await signer.issueApprover(who)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=28800`);
         logger.log("info", "approver_login_ok", {});
         return res;
@@ -494,6 +504,76 @@ async function approvalDecision(signer: TokenSigner, write: WriteApp, planId: st
             decision === "approved" ? "<p>Listo. Volvé al chat y pedile que ejecute el plan (campus_execute_plan).</p>" : "<p>No se va a ejecutar. Podés cerrar esta página.</p>",
         ),
     );
+}
+
+// ---------- Panel del freno de escrituras (ADR-134) ----------
+
+/** Sin sesión del dueño: login con GitHub (mismo flujo que la aprobación) y vuelta al panel. */
+async function adminLogin(cfg: RemoteConfig, signer: TokenSigner): Promise<Response> {
+    const nonce = randomBytes(18).toString("base64url");
+    const gh = new URL("https://github.com/login/oauth/authorize");
+    gh.searchParams.set("client_id", cfg.github.clientId);
+    gh.searchParams.set("redirect_uri", `${cfg.baseUrl}/oauth/github/callback`);
+    gh.searchParams.set("state", await signer.signAdminState(nonce));
+    gh.searchParams.set("allow_signup", "false");
+    const res = new Response(null, { status: 303, headers: { location: gh.toString() } });
+    res.headers.append("set-cookie", `${NONCE_COOKIE}=${nonce}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);
+    return noStore(res);
+}
+
+const BRAKE_LABEL: Record<string, string> = { closed: "Normal (sin freno)", open: "Pausadas por el freno automático", half_open: "Pausa vencida: la próxima escritura es la prueba", manual: "Pausadas sin vencimiento: hace falta reanudar a mano" };
+
+/** GET: estado del freno y, si hay algo que destrabar, el formulario de confirmación. No cambia nada. */
+async function adminPage(cfg: RemoteConfig, signer: TokenSigner, write: WriteApp, req: Request, logger: Logger): Promise<Response> {
+    const sub = await approverOf(signer, req);
+    if (!sub) return adminLogin(cfg, signer);
+    const st = await write.engine.status();
+    const b = st.brake;
+    const row = (k: string, v: string) => `<tr><th style="text-align:left;padding:4px 12px 4px 0">${esc(k)}</th><td>${esc(v)}</td></tr>`;
+    const rows = [
+        row("Estado", BRAKE_LABEL[b.state] ?? b.state),
+        row("Motivo", b.reason ?? "—"),
+        row("Pausado desde", b.paused_at ?? "—"),
+        row("Reapertura automática", b.paused_until_local ?? "—"),
+        row("Fallos distintos en la ventana", `${b.consecutive_failures} de ${b.threshold} (${Math.round(b.failure_window_seconds / 60)} min)`),
+        row("Último fallo", b.last_failure ? `${b.last_failure.at} · ${b.last_failure.scope === "target" ? "de un objetivo" : "sistémico"} · ${b.last_failure.stage ?? "?"} · ${b.last_failure.code ?? "?"}${b.last_failure.http_status ? ` · HTTP ${b.last_failure.http_status}` : ""}` : "—"),
+        row("Última recuperación", b.last_recovery ? `${b.last_recovery.at} · ${b.last_recovery.via}` : "—"),
+        row("Interruptor manual", st.switch.disabled ? "APAGADO (este panel no lo cambia)" : "encendido"),
+    ].join("");
+    const needs = b.state !== "closed" || b.consecutive_failures > 0;
+    const form = needs
+        ? `<form method="post" action="${ADMIN_PATH}/reanudar" style="margin-top:16px">
+  <input type="hidden" name="form" value="${esc(await signer.signAdminForm(sub, randomBytes(18).toString("base64url")))}">
+  <p>Reanudar libera SÓLO el freno: no vuelve a ejecutar planes rechazados, no cambia el interruptor manual ni los límites del día.</p>
+  <label>Escribí <strong>REANUDAR</strong> para confirmar: <input name="confirm" autocomplete="off" required pattern="REANUDAR"></label>
+  <button type="submit">Reanudar las escrituras</button>
+</form>`
+        : "<p>No hay nada que destrabar.</p>";
+    logger.log("info", "admin_page", { brake: b.state });
+    return html(page("Escrituras del Campus · freno", `<table>${rows}</table>${form}`));
+}
+
+/** POST: reanudar con la misma primitiva atómica del motor. Formulario firmado, del dueño y de un solo uso. */
+async function adminResume(signer: TokenSigner, write: WriteApp, req: Request, logger: Logger): Promise<Response> {
+    const sub = await approverOf(signer, req);
+    if (!sub) return html(page("Sesión vencida", `<p>Volvé a abrir <a href="${ADMIN_PATH}">el panel</a>.</p>`), 401);
+    const form = await readForm(req);
+    let jti: string;
+    try {
+        jti = await signer.verifyAdminForm(form.get("form") ?? "", sub);
+    } catch {
+        logger.log("warn", "admin_resume", { outcome: "form_invalid" });
+        return html(page("No se cambió nada", `<p>El formulario venció o no es válido. Volvé a abrir <a href="${ADMIN_PATH}">el panel</a>.</p>`), 409);
+    }
+    if (form.get("confirm") !== "REANUDAR") return html(page("No se cambió nada", `<p>Hay que escribir REANUDAR. <a href="${ADMIN_PATH}">Volver</a>.</p>`), 400);
+    if (!(await write.store.consumeOnce(`admin_${jti}`.slice(0, 64), ADMIN_FORM_TTL_S))) {
+        logger.log("warn", "admin_resume", { outcome: "replay" });
+        return html(page("No se cambió nada", `<p>Este formulario ya se usó. Volvé a abrir <a href="${ADMIN_PATH}">el panel</a>.</p>`), 409);
+    }
+    const r = await write.engine.resume("panel_remoto", `github:${sub}`);
+    logger.log("info", "admin_resume", { outcome: r.result, disabled: r.disabled });
+    const msg = r.result === "no_brake" ? "No había freno: no se cambió nada." : "Freno liberado: las escrituras vuelven a la normalidad.";
+    return html(page(r.result === "no_brake" ? "No había freno" : "Escrituras reanudadas", `<p>${esc(msg)}</p>${r.disabled ? "<p class=\"warn\">El interruptor manual sigue APAGADO: las escrituras siguen deshabilitadas hasta que el dueño lo encienda.</p>" : ""}<p><a href="${ADMIN_PATH}">Volver al panel</a>.</p>`));
 }
 
 // ---------- MCP ----------

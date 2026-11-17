@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { CampusError, toPublicError } from "../errors.js";
 import type { App } from "../app.js";
 import type { Logger } from "../util/logger.js";
@@ -25,6 +25,7 @@ import {
 } from "./plan.js";
 import { computeRisk, grantFor, riskRank, type Risk, type WriteCapability, type WriteProfile } from "./policy.js";
 import type { WriteStore, WriteSwitchState } from "./store.js";
+import { acquireProbe, brakeView, DEFAULT_BRAKE, releaseProbe, recordResult, resumeBrake, type BrakeConfig, type BrakeTransition, type FailureInfo } from "./brake.js";
 import { WriteUncertainError, type WriteTransport } from "./transport.js";
 import { cliCommand } from "../util/cli-command.js";
 import { flattenParams } from "../moodle/serialize.js";
@@ -38,7 +39,29 @@ import { CHAT_FILE_TTL_S, describeChatFile, downloadChatFile, REMOTE_MAX_CHAT_FI
 const MAX_CHAT_FILE_BYTES = 50 * 1024 * 1024;
 
 /** Freno ante fallos (§5.8). */
-export const BRAKE_THRESHOLD = 3;
+/** Umbral por defecto del freno (ADR-134: ahora en write_policy.brake). */
+export const BRAKE_THRESHOLD = DEFAULT_BRAKE.failure_threshold;
+
+/** Códigos que no dependen del objetivo: cada uno cuenta como un fallo distinto para el freno. */
+const SYSTEMIC_CODES = new Set(["AUTH_REQUIRED", "SERVICE_UNAVAILABLE", "NETWORK_ERROR", "RATE_LIMITED", "INTERNAL"]);
+
+/**
+ * Huella de un fallo para el freno (ADR-134), sin contenido: intención, curso, objetivos, etapa, código y
+ * hash de los archivos. Repetir el mismo intento fallido (mismo PDF contra el mismo recurso) da la misma
+ * huella y cuenta una vez; un fallo de infraestructura es sistémico y cuenta siempre.
+ */
+function failureOf(plan: Plan, items: ItemResult[], status: ExecutionStatus): FailureInfo | null {
+    if (status !== "sin_efecto" && status !== "rechazado_por_moodle" && status !== "aplicado_desconocido") return null;
+    const bad = items.find((r) => r.outcome === "rechazado" || r.outcome === "sin_efecto" || r.outcome === "desconocido");
+    const code = bad?.error?.code ?? (bad?.outcome === "sin_efecto" ? "SIN_EFECTO" : null);
+    const stage = bad?.error?.stage ?? (bad?.outcome === "sin_efecto" ? "verify" : null);
+    const http = bad?.error?.http_status ?? null;
+    const systemic = !!code && SYSTEMIC_CODES.has(code) && !(stage === "upload_draft" && http !== null && http >= 400 && http < 500);
+    const item = plan.items.find((i) => i.item_id === bad?.item_id);
+    const files = (item?.uploads?.files ?? []).map((f) => f.sha256).sort();
+    const key = systemic ? [code, randomUUID()] : [plan.intent, plan.course_id, JSON.stringify(item?.target ?? plan.items.map((i) => i.target)), stage, code, http, files.join(",")];
+    return { fingerprint: sha12(key.join("|")), scope: systemic ? "systemic" : "target", stage, code, http_status: http };
+}
 /**
  * ADR-118: se admiten todos los riesgos, también un R4 por escalada. La responsabilidad pasa al humano:
  * desde human_in_the_loop_from_risk el plan no se ejecuta sin la aprobación del usuario.
@@ -67,7 +90,7 @@ export interface WriteEngineDeps {
      * Modo remoto (W5, ADR-060): toda confirmación es fuera de banda por la página web de aprobación,
      * el riesgo tiene un techo propio y no hay archivos locales.
      */
-    remote?: { approvalUrl: (planId: string) => string; maxRisk: Risk };
+    remote?: { approvalUrl: (planId: string) => string; maxRisk: Risk; /** Panel del dueño para destrabar el freno (ADR-134). */ adminUrl?: string };
     /** Descarga de archivos del cliente (tests: fetch y DNS simulados). */
     chatFiles?: ChatFileDeps;
 }
@@ -111,40 +134,79 @@ export class WriteEngine {
         return formatLocal(d, this.tz).slice(0, 10);
     }
 
-    /** Estado con el contador diario renovado si cambió el día. */
-    private async switchState(): Promise<WriteSwitchState> {
-        const s = await this.deps.store.readState();
-        const today = this.dayKey(this.now());
-        if (s.day !== today) return { ...s, day: today, actions_today: 0, messages_today: 0 };
-        return s;
+    private get brakeCfg(): BrakeConfig {
+        return this.policy.brake ?? DEFAULT_BRAKE;
     }
 
-    async assertEnabled(): Promise<void> {
-        if (!this.policy.enabled) throw new CampusError("WRITE_DISABLED", `El perfil ${this.deps.profile.profile_id} tiene las escrituras deshabilitadas (write_policy.enabled=false).`);
-        const s = (await this.switchState());
+    /** Contadores del día renovados si cambió el día. No toca el interruptor ni el freno. */
+    private rollover(s: WriteSwitchState): WriteSwitchState {
+        const today = this.dayKey(this.now());
+        return s.day === today ? s : { ...s, day: today, actions_today: 0, messages_today: 0 };
+    }
+
+    /** Estado con el contador diario renovado si cambió el día. */
+    private async switchState(): Promise<WriteSwitchState> {
+        return this.rollover(await this.deps.store.readState());
+    }
+
+    /** Hora local del perfil, con la zona, para que el usuario no dependa del reloj del cliente. */
+    private localTime(iso: string) {
+        return `${formatLocal(new Date(iso), this.tz)} (${this.tz})`;
+    }
+
+    /** Cómo destrabar el freno desde ESTE modo: el panel en el remoto, la terminal en local. */
+    private resumeHint() {
+        return this.deps.remote?.adminUrl ? `el panel ${this.deps.remote.adminUrl} (con tu GitHub de dueño)` : `tu terminal: ${this.cli("resume")}`;
+    }
+
+    /**
+     * Barrera de escrituras (ADR-134). `execute` además rechaza mientras otra ejecución tiene el turno de
+     * prueba; planificar en half_open sí se permite (planificar no escribe y no es prueba de salud).
+     */
+    async assertEnabled(mode: "plan" | "execute" = "plan"): Promise<void> {
+        if (!this.policy.enabled) throw new CampusError("WRITE_DISABLED", `El perfil ${this.deps.profile.profile_id} tiene las escrituras deshabilitadas (write_policy.enabled=false).`, { details: { reason: "profile_disabled" } });
+        const s = await this.switchState();
         if (s.disabled) {
-            throw new CampusError("WRITE_DISABLED", "Las escrituras están deshabilitadas por el interruptor general. Las lecturas siguen funcionando.", { humanAction: `Para reactivarlas, desde tu terminal: ${this.cli("enable")}` });
+            throw new CampusError("WRITE_DISABLED", "Las escrituras están deshabilitadas por el interruptor general (no vence solo). Las lecturas siguen funcionando.", {
+                humanAction: this.deps.remote ? "Sólo el dueño las reactiva desde su terminal (campus write enable con el perfil del remoto) o el panel de Vercel." : `Para reactivarlas, desde tu terminal: ${this.cli("enable")}`,
+                details: { reason: "manual_disable", brake: false },
+            });
         }
-        if (s.paused) {
-            throw new CampusError("WRITE_DISABLED", `Escrituras pausadas por el freno: ${s.paused_reason ?? "fallos seguidos"}.`, {
-                humanAction: `Revisá el registro (${this.cli("log")}) y reactivá desde tu terminal: ${this.cli("resume")}`,
-                details: { brake: true, consecutive_failures: s.consecutive_failures },
+        const v = brakeView(s, this.now(), this.brakeCfg);
+        if (v.state === "open") {
+            throw new CampusError("WRITE_DISABLED", `Escrituras pausadas por el freno automático (${s.paused_reason ?? "fallos seguidos"}) hasta ${this.localTime(v.paused_until!)}: faltan ${Math.ceil(v.retry_after_seconds! / 60)} minutos. Después, la primera ejecución es una prueba controlada. Las lecturas siguen funcionando.`, {
+                humanAction: `Esperá a esa hora, o reanudá antes desde ${this.resumeHint()}.`,
+                details: { reason: "automatic_cooldown", brake: true, paused_until: v.paused_until, retry_after_seconds: v.retry_after_seconds, failures_in_window: v.failures_in_window },
+            });
+        }
+        if (v.state === "manual") {
+            throw new CampusError("WRITE_DISABLED", `Escrituras pausadas por el freno (${s.paused_reason ?? "fallos seguidos"}) sin fecha de vencimiento confiable: no se reabren solas. Las lecturas siguen funcionando.`, {
+                humanAction: `Reanudá desde ${this.resumeHint()}.`,
+                details: { reason: "manual_recovery_required", brake: true, paused_until: null, retry_after_seconds: null },
+            });
+        }
+        if (v.state === "half_open" && v.probe_in_progress && mode === "execute") {
+            throw new CampusError("WRITE_DISABLED", "Terminó la pausa del freno y otra ejecución está haciendo la escritura de prueba. No se escribió nada: volvé a intentar en unos minutos.", {
+                details: { reason: "probe_in_progress", brake: true, probe_in_progress: true, retry_after_seconds: 60 },
             });
         }
     }
 
     async setSwitch(disabled: boolean, via: string): Promise<WriteSwitchState> {
-        const s = { ...(await this.switchState()), disabled, changed_at: this.now().toISOString() };
-        await this.deps.store.writeState(s);
+        const { after } = await this.deps.store.updateState((s) => ({ ...this.rollover(s), disabled, changed_at: this.now().toISOString() }));
         await this.audit({ event: disabled ? "switch_disabled" : "switch_enabled", via });
-        return s;
+        return after;
     }
 
-    async resume(via: string): Promise<WriteSwitchState> {
-        const s = { ...(await this.switchState()), paused: false, paused_at: null, paused_reason: null, consecutive_failures: 0 };
-        await this.deps.store.writeState(s);
-        await this.audit({ event: "brake_resumed", via });
-        return s;
+    /**
+     * Recuperación administrativa (CLI local o panel remoto): sólo el freno. No toca `disabled` ni los
+     * contadores del día. `result` dice si había freno y si el interruptor manual sigue apagado.
+     */
+    async resume(via: string, by: string | null = null) {
+        const { before, after, changed } = await this.deps.store.updateState((s) => (s.paused || s.probe || s.failures.length ? resumeBrake(this.rollover(s), this.now(), via) : null));
+        const prior = brakeView(before, this.now(), this.brakeCfg);
+        await this.audit({ event: changed ? "brake_resumed_manually" : "brake_resume_noop", via, by, prior_state: prior.state, prior_paused_until: prior.paused_until, prior_failures_in_window: prior.failures_in_window, disabled: after.disabled });
+        return { result: !before.paused ? ("no_brake" as const) : ("resumed" as const), disabled: after.disabled, state: after };
     }
 
     private async audit(event: Record<string, unknown>) {
@@ -420,7 +482,7 @@ export class WriteEngine {
     }
 
     async execute(planId: string, confirmer: Confirmer, client: string, approval: HumanApproval = {}): Promise<ExecutionResult> {
-        await this.assertEnabled();
+        await this.assertEnabled("execute");
         let sp = await this.loadVerified(planId);
         await this.assertExecutable(sp);
         const intent = this.intentOf(sp.plan.intent);
@@ -459,6 +521,35 @@ export class WriteEngine {
         const plan = sp.plan;
         // Identidad en vivo (sitio y usuario) justo antes de escribir.
         await this.deps.read.session.verify();
+        // Vencida la pausa del freno, esta ejecución es la prueba: el turno se toma de forma atómica.
+        const probeId = await this.takeProbe();
+        let recorded = false;
+        try {
+            return await this.run(sp, intent, confirmation, client, probeId, () => (recorded = true));
+        } finally {
+            // Sin resultado registrado no se emitió nada (o se cortó antes): el turno se suelta sin veredicto.
+            if (probeId && !recorded) await this.deps.store.updateState((s) => (s.probe?.id === probeId ? releaseProbe(s, probeId) : null));
+        }
+    }
+
+    /** null si el freno está cerrado; si no, el id del turno de prueba tomado (o WRITE_DISABLED). */
+    private async takeProbe(): Promise<string | null> {
+        const now = this.now();
+        if (brakeView(await this.deps.store.readState(), now, this.brakeCfg).state === "closed") return null;
+        const id = randomUUID();
+        const { after, changed } = await this.deps.store.updateState((s) => acquireProbe(s, now, this.brakeCfg, id));
+        if (changed) {
+            await this.audit({ event: "brake_half_open", probe_id: id, brake_cycle: after.brake_cycle });
+            return id;
+        }
+        if (brakeView(after, now, this.brakeCfg).state === "closed") return null; // otra prueba ya lo cerró
+        await this.assertEnabled("execute");
+        throw new CampusError("WRITE_DISABLED", "No se pudo tomar el turno de prueba del freno. No se escribió nada.", { details: { reason: "probe_in_progress", brake: true, probe_in_progress: true, retry_after_seconds: 60 } });
+    }
+
+    private async run(sp: StoredPlan, intent: WriteIntent<any>, confirmation: { channel: string; at: string }, client: string, probeId: string | null, onRecorded: () => void): Promise<ExecutionResult> {
+        const plan = sp.plan;
+        const planId = plan.plan_id;
         if (!(await this.deps.store.claim(planId, this.now().toISOString()))) {
             throw new CampusError("PLAN_ALREADY_EXECUTED", "Otra ejecución tomó este plan: no se vuelve a escribir.", { details: { state: "en_ejecucion_o_interrumpido" } });
         }
@@ -543,7 +634,9 @@ export class WriteEngine {
                 }
                 const pe = toPublicError(e);
                 if (pe.code === "AUTH_REQUIRED" && e instanceof CampusError) authError = e;
-                items.push({ ...base, outcome: "rechazado", error: { code: pe.code, message: pe.message, moodle_errorcode: pe.moodle_errorcode } });
+                const stage = typeof pe.details?.stage === "string" ? pe.details.stage : item.call.kind === "form" ? "form_submit" : item.call.kind === "ajax" ? "ajax_call" : "ws_call";
+                const http = typeof pe.details?.http_status === "number" ? pe.details.http_status : null;
+                items.push({ ...base, outcome: "rechazado", error: { code: pe.code, message: pe.message, moodle_errorcode: pe.moodle_errorcode, stage, http_status: http } });
             }
         }
 
@@ -607,7 +700,15 @@ export class WriteEngine {
             const orig = await this.deps.store.loadPlan(origPlanId);
             if (orig) await this.deps.store.savePlanState(origPlanId, { ...orig.state, undone_by: actionId });
         }
-        await this.recordOutcome(status, functions.length, messages);
+        // La escritura ya se emitió: si el almacén falla al registrar el freno, el resultado no se pierde (queda el aviso).
+        try {
+            const brake = await this.recordOutcome(status, functions.length, messages, failureOf(plan, finalItems, status), probeId);
+            onRecorded();
+            if (brake) warnings.push(brake);
+        } catch (e) {
+            this.deps.logger.log("error", "brake_record_failed", { code: toPublicError(e).code });
+            warnings.push("No se pudo registrar este resultado en el freno ni en el consumo del día (almacén de estado). La escritura y su verificación de arriba valen igual.");
+        }
         await this.audit({
             event: "execution",
             action_id: actionId,
@@ -689,20 +790,24 @@ export class WriteEngine {
         await this.deps.store.savePlanState(planId, { ...state, ...(prev?.undone_by ? { undone_by: prev.undone_by } : {}) });
     }
 
-    /** Contadores del día y freno ante fallos seguidos. */
-    private async recordOutcome(status: ExecutionStatus, calls: number, messages: number) {
-        const s = (await this.switchState());
-        s.actions_today += calls;
-        s.messages_today += messages;
-        if (status === "sin_efecto" || status === "rechazado_por_moodle") s.consecutive_failures++;
-        else if (status === "aplicado_verificado" || status === "aplicado_con_diferencias") s.consecutive_failures = 0;
-        if (!s.paused && s.consecutive_failures >= BRAKE_THRESHOLD) {
-            s.paused = true;
-            s.paused_at = this.now().toISOString();
-            s.paused_reason = `${s.consecutive_failures} resultados seguidos sin efecto o rechazados por Moodle`;
-            await this.audit({ event: "brake_engaged", consecutive_failures: s.consecutive_failures });
-        }
-        await this.deps.store.writeState(s);
+    /**
+     * Contadores del día y freno (ADR-134), en UNA transición atómica. Devuelve un aviso para el resultado
+     * si el freno cambió.
+     */
+    private async recordOutcome(status: ExecutionStatus, calls: number, messages: number, failure: FailureInfo | null, probeId: string | null): Promise<string | null> {
+        const now = this.now();
+        let transition: BrakeTransition = null;
+        const { after } = await this.deps.store.updateState((s0) => {
+            const s = this.rollover(s0);
+            const r = recordResult({ ...s, actions_today: s.actions_today + calls, messages_today: s.messages_today + messages }, now, this.brakeCfg, status, failure, probeId);
+            transition = r.transition;
+            return r.state;
+        });
+        if (!transition) return null;
+        const v = brakeView(after, now, this.brakeCfg);
+        await this.audit({ event: transition, status, probe_id: probeId, brake_cycle: after.brake_cycle, paused_until: v.paused_until, failures_in_window: v.failures_in_window, failure_scope: failure?.scope ?? null, failure_stage: failure?.stage ?? null, failure_code: failure?.code ?? null });
+        if (transition === "brake_recovered") return "La escritura de prueba tras la pausa del freno salió verificada: las escrituras vuelven a la normalidad.";
+        return `El freno pausó las escrituras hasta ${this.localTime(v.paused_until!)} (${after.paused_reason}). Las lecturas siguen.`;
     }
 
     // ---------- deshacer ----------
@@ -739,16 +844,33 @@ export class WriteEngine {
 
     async status() {
         const s = (await this.switchState());
+        const bv = brakeView(s, this.now(), this.brakeCfg);
         const lim = this.policy.limits;
         const intents = [...this.deps.intents.values()];
         return {
             profile_id: this.deps.profile.profile_id,
             read_profile: this.deps.profile.read_profile.profile_id,
             site_url: this.deps.profile.read_profile.site_url,
-            enabled: this.policy.enabled && !s.disabled && !s.paused,
+            enabled: this.policy.enabled && !s.disabled && (bv.state === "closed" || bv.state === "half_open"),
             write_policy_enabled: this.policy.enabled,
             switch: { disabled: s.disabled, changed_at: s.changed_at },
-            brake: { paused: s.paused, paused_at: s.paused_at, reason: s.paused_reason, consecutive_failures: s.consecutive_failures, threshold: BRAKE_THRESHOLD },
+            brake: {
+                state: bv.state,
+                paused: s.paused,
+                paused_at: s.paused_at,
+                paused_until: bv.paused_until,
+                paused_until_local: bv.paused_until ? this.localTime(bv.paused_until) : null,
+                retry_after_seconds: bv.retry_after_seconds,
+                probe_in_progress: bv.probe_in_progress,
+                reason: s.paused_reason,
+                consecutive_failures: bv.failures_in_window,
+                threshold: this.brakeCfg.failure_threshold,
+                failure_window_seconds: this.brakeCfg.failure_window_seconds,
+                cooldown_seconds: this.brakeCfg.cooldown_seconds,
+                last_failure: s.last_failure,
+                last_recovery: s.last_recovery,
+                recovery: this.deps.remote?.adminUrl ? { automatic: "tras el cooldown, con una escritura de prueba", manual: this.deps.remote.adminUrl } : { automatic: "tras el cooldown, con una escritura de prueba", manual: this.cli("resume") },
+            },
             limits: lim,
             today: { day: s.day, actions: s.actions_today, messages: s.messages_today, remaining_actions: Math.max(0, lim.max_actions_per_day - s.actions_today), remaining_messages: Math.max(0, lim.max_messages_per_day - s.messages_today) },
             confirmation: {

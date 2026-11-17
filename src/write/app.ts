@@ -122,7 +122,7 @@ export interface WriteAppDeps {
     /** Almacén de escritura (por defecto, archivos en `location`; en remoto, KV). */
     store?: WriteStore;
     /** Modo remoto (W5): aprobación por página web, techo de riesgo y sin archivos locales. */
-    remote?: { approvalUrl: (planId: string) => string; maxRisk: Risk };
+    remote?: { approvalUrl: (planId: string) => string; maxRisk: Risk; adminUrl?: string };
     /** Canal fuera de banda del servidor MCP (por defecto, diálogo de Windows si el perfil lo habilita). */
     confirmer?: Confirmer;
     /** Descarga de archivos que entrega el cliente (tests: fetch y DNS simulados). */
