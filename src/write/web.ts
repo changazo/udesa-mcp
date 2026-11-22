@@ -49,6 +49,26 @@ export function parseFormFields(html: string, qfMarker: string): [string, string
     return out;
 }
 
+/**
+ * Controles que el formulario ofrece HABILITADOS: inputs (no ocultos), selects y textareas con nombre, sin
+ * `disabled`. Un control congelado de Moodle se dibuja como texto + campo oculto: no cuenta (ADR-143).
+ */
+export function offeredControls(html: string, qfMarker: string): Set<string> | null {
+    const forms = [...html.matchAll(/<form\b[\s\S]*?<\/form>/gi)].map((m) => m[0]);
+    const form = forms.find((f) => new RegExp(`name=["']${qfMarker}["']`).test(f));
+    if (!form) return null;
+    const out = new Set<string>();
+    for (const m of form.matchAll(/<(input|select|textarea)\b[^>]*>/gi)) {
+        const tag = m[0];
+        const name = /\sname\s*=\s*("([^"]*)"|'([^']*)')/i.exec(tag);
+        if (!name) continue;
+        if (/\sdisabled(\s|=|>|\/)/i.test(tag)) continue;
+        if (m[1]!.toLowerCase() === "input" && /\stype\s*=\s*["']?hidden/i.test(tag)) continue;
+        out.add(decodeEntities(name[2] ?? name[3] ?? ""));
+    }
+    return out;
+}
+
 /** Errores de validación de un formulario de Moodle devuelto con 200. */
 export function formErrors(html: string): string[] {
     const errs = [...html.matchAll(/id=["']id_error_[^"']*["'][^>]*>([\s\S]*?)<\/(div|span)>/gi)]
@@ -114,6 +134,15 @@ export class WebWriter {
             if (info.login) throw new CampusError("AUTH_REQUIRED", "La sesión web del Campus venció.");
             const base = spec.merge_form_defaults ? parseFormFields(html, spec.qf_marker) : [];
             if (base === null) throw new CampusError(info.error ? "MOODLE_PERMISSION_DENIED" : "UNEXPECTED_RESPONSE", info.error ? `El Campus rechazó abrir el formulario: ${info.error}` : `No se encontró el formulario ${spec.qf_marker} en la página.`);
+            // ADR-143: los controles pedidos tienen que estar ofrecidos y habilitados; si no, Moodle descartaría el valor en silencio.
+            if (spec.required_controls?.length || spec.controls_when_set?.length) {
+                const offered = offeredControls(html, spec.qf_marker) ?? new Set<string>();
+                const needed = [...(spec.required_controls ?? []), ...(spec.controls_when_set ?? []).filter((k) => fields[k] !== undefined && fields[k] !== "0")];
+                const missing = needed.filter((k) => !offered.has(k));
+                if (missing.length) {
+                    throw new CampusError("MOODLE_PERMISSION_DENIED", `El formulario ${formId} no ofrece ${missing.join(", ")} para esta cuenta o este sitio: no se envió nada (no se publica con valores por defecto).`, { details: { reason: "control_not_offered", controls: missing } });
+                }
+            }
             // Preparación sobre lo servido (p. ej. el borrador de archivos del formulario): si falla, no se envía nada.
             if (beforePost) await beforePost(base);
             let override: Record<string, string> = { ...fields, ...(spec.forced ?? {}), ...secrets };

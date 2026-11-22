@@ -717,6 +717,16 @@ export interface WebFormWriteSpec {
      * bitácora ni la respuesta. Si falta el valor, no se envía nada.
      */
     secret_fields?: Record<string, { env: string }>;
+    /**
+     * Controles que el formulario servido TIENE que ofrecer habilitados (no ocultos ni congelados), o no
+     * se envía nada (ADR-143): p. ej. el período de una discusión solo existe con los timed posts del sitio.
+     */
+    required_controls?: string[];
+    /**
+     * Controles que tienen que estar ofrecidos y habilitados cuando el plan los fija en un valor distinto
+     * de «0» (ADR-143): sin ellos Moodle descartaría el valor en silencio (p. ej. `mailnow` sin permiso).
+     */
+    controls_when_set?: string[];
 }
 
 const dateFields = (prefix: string) => ({
@@ -1552,7 +1562,54 @@ const CONTENT_FORMS: readonly WebFormWriteSpec[] = [
 ];
 
 /** W6 adelantada a pedido del dueño (ADR-050 y ADR-055): crear actividades y sesiones por formulario. */
+/** Campos de un date_time_selector OPCIONAL de Moodle (ADR-143). */
+const dateSelector = (prefix: string): Record<string, (v: string) => boolean> => ({
+    [`${prefix}[enabled]`]: oneOf("0", "1"),
+    [`${prefix}[day]`]: range(1, 31),
+    [`${prefix}[month]`]: range(1, 12),
+    [`${prefix}[year]`]: range(2000, 2050),
+    [`${prefix}[hour]`]: range(0, 23),
+    [`${prefix}[minute]`]: range(0, 59),
+});
+const FORUM_POST_FORM = { path: "/mod/forum/post.php", qf_marker: "_qf__mod_forum_post_form", merge_form_defaults: true, submit_button: "submitbutton" } as const;
+
 export const WRITE_WEB_FORMS: readonly WebFormWriteSpec[] = [
+    // ADR-143: discusión con período de visualización y/o «enviar sin demora» (mod_forum_add_discussion fuerza
+    // timestart=0, timeend=0 y mailnow=0): UN formulario nativo crea la discusión con todo junto, nunca «crear y después editar».
+    {
+        id: "forum_post_create_advanced",
+        ...FORUM_POST_FORM,
+        query: { forum: int },
+        fields: { subject: SUBJECT, "message[text]": MESSAGE, "message[format]": oneOf("1"), discussionsubscribe: BOOL, pinned: BOOL, mailnow: BOOL, groupinfo: groupId, attachments: int, groupid: oneOf("0"), ...dateSelector("timestart"), ...dateSelector("timeend") },
+        required: ["subject", "message[text]", "message[format]", "discussionsubscribe", "pinned", "mailnow", "timestart[enabled]", "timeend[enabled]"],
+        omit_when_zero: ["discussionsubscribe", "pinned", "mailnow", "timestart[enabled]", "timeend[enabled]"],
+        controls_when_set: ["discussionsubscribe", "pinned", "mailnow", "groupinfo", "timestart[enabled]", "timeend[enabled]"],
+        upload_fields: ["attachments"],
+        effects: "Crea una discusión (primer post) con su período de visualización y, si se pide, mailnow=1 (Moodle procesa el correo sin esperar maxeditingtime; la entrega depende del cron y de las suscripciones).",
+    },
+    // ADR-143: cambiar SOLO el período de una discusión, desde el formulario de edición de su primer post.
+    {
+        id: "forum_post_edit_display_period",
+        ...FORUM_POST_FORM,
+        query: { edit: int },
+        fields: { ...dateSelector("timestart"), ...dateSelector("timeend") },
+        required: ["timestart[enabled]", "timeend[enabled]"],
+        omit_when_zero: ["timestart[enabled]", "timeend[enabled]"],
+        required_controls: ["timestart[enabled]", "timeend[enabled]"],
+        effects: "Cambia el período de visualización de la discusión. El resto del formulario (asunto, mensaje, grupo, fijado, suscripción y adjuntos) se reenvía tal como lo sirve Moodle. No reenvía correos.",
+    },
+    // ADR-143: respuesta con «enviar sin demora» (mailnow=1); la respuesta privada usa la casilla nativa.
+    {
+        id: "forum_post_reply_advanced",
+        ...FORUM_POST_FORM,
+        query: { reply: int },
+        fields: { subject: SUBJECT, "message[text]": MESSAGE, "message[format]": oneOf("1"), discussionsubscribe: BOOL, mailnow: BOOL, isprivatereply: BOOL, attachments: int },
+        required: ["subject", "message[text]", "message[format]", "discussionsubscribe", "mailnow", "isprivatereply"],
+        omit_when_zero: ["discussionsubscribe", "mailnow", "isprivatereply"],
+        controls_when_set: ["discussionsubscribe", "mailnow", "isprivatereply"],
+        upload_fields: ["attachments"],
+        effects: "Crea una respuesta con mailnow=1 (Moodle procesa el correo sin esperar maxeditingtime; la entrega depende del cron y de las suscripciones).",
+    },
     {
         id: "course_modedit_attendance_add",
         path: "/course/modedit.php",

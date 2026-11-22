@@ -386,6 +386,14 @@ El foro de Avisos del sandbox tiene **suscripción forzada**: un aviso les llega
 
 Para que no salga ningún correo, la alternativa más segura es hacer las pruebas en un foro de prueba con suscripción opcional (nadie queda suscripto por defecto, ADR-098), con su `forum_id`.
 
+### Programar un aviso o mandarlo sin demora (ADR-143)
+
+- **Programar:** pedile al agente el aviso con `display_start` (y, si querés, `display_end`) en tu hora local, por ejemplo «2026-12-01T08:00». El plan muestra la hora local y el instante UTC. Los estudiantes no ven la discusión hasta esa hora, y Moodle no manda el correo antes.
+- **Cambiar o quitar el período después:** `campus_plan_forum_display_period` sobre una discusión tuya. Ausente conserva ese extremo y `null` lo quita.
+- **Sin demora:** `notify_without_edit_delay: true`. Moodle procesa el correo en el próximo cron, sin la ventana de edición. Es **irreversible**: borrar después no lo retira de los buzones. El plan es R3: el agente te lo presenta y espera tu aprobación en el chat.
+- Las dos opciones van por el formulario web del Campus y necesitan la sesión web. Si el formulario no las ofrece (timed posts deshabilitados en el sitio, o una cuenta sin permiso de `mailnow`), no se publica nada y el error lo dice.
+- Programado + sin demora a la vez está bloqueado hasta validarlo en real.
+
 ### Habilitar una capacidad (sólo quien despliega)
 
 1. La capacidad tiene que estar verificada en tu curso de pruebas (sandbox).

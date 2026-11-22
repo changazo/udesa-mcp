@@ -6,6 +6,7 @@ import type { Difference, ExecutionResult, Plan, PlanDraft, PlanItem } from "../
 import type { Risk } from "../policy.js";
 import { comparable, toHtml, type TextFormat } from "../text.js";
 import { describeLocalFiles, MAX_PLAN_FILES, type PlanFile } from "../files.js";
+import { formatLocal, parseLocalDateTime, selectorFields, type LocalDateTime } from "../local-time.js";
 
 /**
  * W1 · Foros (directiva §8.1; investigación [F] §2). Cuatro intenciones docentes:
@@ -50,6 +51,10 @@ const DiscussionsSchema = z.object({
             locked: bool,
             canreply: bool,
             numreplies: optNum,
+            // ADR-143: período de visualización y marca «enviar sin demora» del primer post.
+            timestart: optNum,
+            timeend: optNum,
+            mailnow: bool,
         }),
     ),
 });
@@ -173,6 +178,11 @@ export async function readForumVersions(plan: Plan, ctx: IntentContext): Promise
         const forumId = Number(a);
         if (kind === "can_add") out[key] = (await canAdd(ctx, forumId, Number(b))).status ? 1 : 0;
         else if (kind === "discussion") out[key] = (await rowsOf(forumId)).find((r) => r.discussion === Number(b))?.timemodified ?? null;
+        else if (kind === "period") {
+            // ADR-143: período + modificación del primer post (un cambio concurrente de cualquiera de los tres invalida el plan).
+            const r = (await rowsOf(forumId)).find((x) => x.discussion === Number(b));
+            out[key] = r ? periodVersion(r) : null;
+        }
         else if (kind === "flags") {
             const r = (await rowsOf(forumId)).find((x) => x.discussion === Number(b));
             out[key] = r ? `${r.pinned ? 1 : 0}${r.locked ? 1 : 0}` : null;
@@ -187,6 +197,8 @@ export async function readForumVersions(plan: Plan, ctx: IntentContext): Promise
     }
     return out;
 }
+
+export const periodVersion = (r: { timestart?: number | null; timeend?: number | null; timemodified?: number | null }) => `${r.timestart ?? 0}|${r.timeend ?? 0}|${r.timemodified ?? ""}`;
 
 // ---------- comportamiento por función ----------
 
@@ -208,6 +220,11 @@ function interpretForum(item: PlanItem, data: unknown): Interpretation {
         case "mod_forum_update_discussion_post":
         case "mod_forum_delete_post":
             return d.status === false ? { ok: false, reason: "Moodle devolvió status=false." } : { ok: true };
+        case "forum_post_reply_advanced": {
+            // ADR-143: la redirección de una respuesta apunta al post (`#p<id>`); si no, se ubica por contenido.
+            const m = /#p(\d+)$/.exec(typeof d.location === "string" ? d.location : "");
+            return m ? { ok: true, moodle_ids: { post_id: Number(m[1]) } } : { ok: true };
+        }
         default:
             return { ok: true };
     }
@@ -306,6 +323,85 @@ async function verifyForum(item: PlanItem, plan: Plan, ctx: IntentContext, known
             if (observed === x[field]) return { outcome: "coincide", checked: [field], differences: [] };
             return { outcome: observed === x[`prior_${field}`] ? "sin_efecto" : "difiere", checked: [field], differences: [{ field, expected: x[field], observed }] };
         }
+        case "forum_post_create_advanced": {
+            // ADR-143: el formulario redirige al foro sin el id de la discusión: se ubica por contenido, y sólo si la coincidencia es única.
+            const { rows, complete } = await discussionsOf(ctx, forumId);
+            const mine = await me(ctx);
+            let row = known.discussion_id ? rows.find((r) => r.discussion === known.discussion_id) : undefined;
+            if (!row) {
+                const candidates = rows.filter((r) => r.userid === mine && (r.subject ?? r.name ?? null) === x.subject && comparable(r.message) === x.message_text && (r.created ?? 0) >= planUnix(plan) - 120);
+                if (candidates.length > 1) throw new CampusError("AMBIGUOUS_RESOURCE", "Hay más de una discusión que coincide con la creada: no se puede saber cuál es. No se reintenta.");
+                row = candidates[0];
+                if (!row && !complete) throw new CampusError("INCOMPLETE_RESULT", "No se pudo confirmar la creación: el foro tiene más páginas que las leídas.");
+            }
+            if (!row) return { outcome: "sin_efecto", checked: ["discusión"], differences: [{ field: "discusión", expected: "creada", observed: "no aparece en el foro" }] };
+            const differences = [
+                ...diff("subject", x.subject, row.subject ?? row.name ?? null),
+                ...diff("message", x.message_text, comparable(row.message)),
+                ...diff("groupid", x.groupid, row.groupid ?? null),
+                ...diff("pinned", x.pinned, row.pinned ?? false),
+                ...diff("timestart", x.timestart, row.timestart ?? 0),
+                ...diff("timeend", x.timeend, row.timeend ?? 0),
+            ];
+            const checked = ["subject", "message", "groupid", "pinned", "timestart", "timeend"];
+            let note: string | undefined;
+            if (row.mailnow === null || row.mailnow === undefined) note = "La lectura no expone mailnow: la marca «enviar sin demora» no se pudo comprobar.";
+            else {
+                checked.push("mailnow");
+                differences.push(...diff("mailnow", x.mailnow, row.mailnow));
+            }
+            if (Array.isArray(x.attachments)) {
+                checked.push("attachments");
+                const first = (await postsOf(ctx, plan.course_id, forumId, row.discussion)).find((p) => p.id === row.id);
+                differences.push(...diff("attachments", JSON.stringify(x.attachments), JSON.stringify(observedAttachments(first))));
+            }
+            // Con mailnow no hay ventana sin correo: el deshacer no la anuncia.
+            return { outcome: differences.length ? "difiere" : "coincide", checked, differences, moodle_ids: { discussion_id: row.discussion, post_id: row.id }, ...(x.mailnow ? {} : { undo_until: untilFromCreated(row.created) }), ...(note ? { note } : {}) };
+        }
+        case "forum_post_reply_advanced": {
+            const posts = await postsOf(ctx, plan.course_id, forumId, Number(t.discussion_id));
+            const mine = await me(ctx);
+            let post = known.post_id ? posts.find((p) => p.id === known.post_id) : undefined;
+            if (!post) {
+                const candidates = posts.filter((p) => p.author?.id === mine && p.parentid === x.parent_id && comparable(p.message) === x.message_text && (p.timecreated ?? 0) >= planUnix(plan) - 120);
+                if (candidates.length > 1) throw new CampusError("AMBIGUOUS_RESOURCE", "Hay más de una respuesta que coincide con la creada: no se puede saber cuál es. No se reintenta.");
+                post = candidates[0];
+            }
+            if (!post) return { outcome: "sin_efecto", checked: ["respuesta"], differences: [{ field: "respuesta", expected: "creada", observed: "no aparece en la discusión" }] };
+            const differences = [
+                ...diff("parent_id", x.parent_id, post.parentid ?? null),
+                ...diff("private", x.private, post.isprivatereply ?? false),
+                ...diff("subject", x.subject, post.subject ?? null),
+                ...diff("message", x.message_text, comparable(post.message)),
+            ];
+            const checked = ["parent_id", "private", "subject", "message"];
+            if (Array.isArray(x.attachments)) {
+                checked.push("attachments");
+                differences.push(...diff("attachments", JSON.stringify(x.attachments), JSON.stringify(observedAttachments(post))));
+            }
+            return { outcome: differences.length ? "difiere" : "coincide", checked, differences, moodle_ids: { post_id: post.id }, note: "La lectura de posts no expone mailnow: la marca «enviar sin demora» no se pudo comprobar (sí la aceptación del formulario)." };
+        }
+        case "forum_post_edit_display_period": {
+            const row = (await discussionsOf(ctx, forumId)).rows.find((r) => r.discussion === Number(t.discussion_id));
+            if (!row) return { outcome: "difiere", checked: ["discusión"], differences: [{ field: "discusión", expected: "existe", observed: "no aparece" }] };
+            const keep = x.keep as { subject: string | null; message_text: string; pinned: boolean; groupid: number | null; attachments: string[] };
+            const start = row.timestart ?? 0;
+            const end = row.timeend ?? 0;
+            const period = [...diff("timestart", x.timestart, start), ...diff("timeend", x.timeend, end)];
+            const first = (await postsOf(ctx, plan.course_id, forumId, row.discussion)).find((p) => p.id === row.id);
+            // Lo que NO se tenía que tocar: cualquier cambio es una diferencia, aunque el período haya quedado bien.
+            const kept = [
+                ...diff("subject", keep.subject, row.subject ?? row.name ?? null),
+                ...diff("message", keep.message_text, comparable(row.message)),
+                ...diff("pinned", keep.pinned, row.pinned ?? false),
+                ...diff("groupid", keep.groupid, row.groupid ?? null),
+                ...diff("attachments", JSON.stringify(keep.attachments), JSON.stringify(observedAttachments(first))),
+            ];
+            const checked = ["timestart", "timeend", "subject", "message", "pinned", "groupid", "attachments"];
+            if (!period.length && !kept.length) return { outcome: "coincide", checked, differences: [], moodle_ids: { discussion_id: row.discussion, post_id: row.id } };
+            const untouched = start === x.prior_timestart && end === x.prior_timeend && !kept.length;
+            return { outcome: untouched ? "sin_efecto" : "difiere", checked, differences: [...period, ...kept], moodle_ids: { discussion_id: row.discussion, post_id: row.id } };
+        }
         default:
             throw new CampusError("UNEXPECTED_RESPONSE", `Sin verificación para ${item.call.fn}.`);
     }
@@ -322,12 +418,13 @@ function deleteDraft(plan: Plan, result: ExecutionResult, title: string): UndoDr
     const r = result.items.find((i) => i.outcome === "verificado" || i.outcome === "con_diferencias" || i.outcome === "desconocido");
     const item = r && plan.items.find((i) => i.item_id === r.item_id);
     if (!r || !item) return { kind: "ninguno", reason: "La acción no aplicó cambios." };
-    const isDiscussion = item.call.fn === "mod_forum_add_discussion";
+    const isDiscussion = item.call.fn === "mod_forum_add_discussion" || item.call.fn === "forum_post_create_advanced";
+    const mailnow = item.expected.mailnow === true;
     const postId = r.moodle_ids.post_id;
     const discussionId = isDiscussion ? r.moodle_ids.discussion_id : Number(item.target.discussion_id);
     if (!postId || !discussionId) return { kind: "ninguno", reason: "No se conoce el ID del post creado (la verificación no lo encontró): revisá en el Campus." };
     const forumId = Number(item.target.forum_id);
-    const untilNote = result.undo.until ? ` Ventana sin correo hasta ${result.undo.until} (en UdeSA el correo sale unos 5 min después de publicar).` : "";
+    const untilNote = mailnow ? " Se publicó con «enviar sin demora» (mailnow): borrar NO evita el correo." : result.undo.until ? ` Ventana sin correo hasta ${result.undo.until} (en UdeSA el correo sale unos 5 min después de publicar).` : "";
     return {
         kind: "plan",
         draft: {
@@ -339,7 +436,9 @@ function deleteDraft(plan: Plan, result: ExecutionResult, title: string): UndoDr
             payload_preview: { delete: isDiscussion ? { discussion_id: discussionId, first_post_id: postId } : { post_id: postId, discussion_id: discussionId } },
             side_effects: [
                 isDiscussion ? "Borra la discusión entera (con sus respuestas, si las hubiera). Irreversible: no hay papelera." : "Borra la respuesta (y sus respuestas, si las hubiera). Irreversible.",
-                "Si todavía no pasó maxeditingtime, el correo no sale. Si ya salió, queda en los buzones.",
+                mailnow
+                    ? "Se publicó con mailnow: Moodle procesa el correo en el próximo cron, sin ventana de edición. Borrar no lo retira de los buzones si ya salió."
+                    : "Si todavía no pasó maxeditingtime, el correo no sale. Si ya salió, queda en los buzones.",
             ],
             preconditions: { description: "El post sigue existiendo y no se editó desde la ejecución.", versions: { [`post:${forumId}:${discussionId}:${postId}`]: null } },
             undo: { kind: "ninguno", how: "El borrado no se puede deshacer.", until: null },
@@ -396,6 +495,9 @@ const announcementShape = {
     pin: z.boolean().optional().describe("Fijar la discusión (por defecto no)."),
     subscribe: z.boolean().optional().describe("Suscribirte a la discusión (te llegan sus correos). Por defecto no (ADR-098)."),
     attachments: z.array(z.string().min(1).max(1000)).max(MAX_PLAN_FILES).optional().describe("Rutas ABSOLUTAS de archivos locales que el humano indicó para adjuntar (nunca archivos «encontrados»). El plan muestra nombre, tamaño y hash; si cambian antes de ejecutar, el plan queda obsoleto."),
+    display_start: z.string().nullable().optional().describe("Mostrar desde (AAAA-MM-DDTHH:mm, hora local del perfil, sin zona). Ausente o null: visible enseguida. Con fecha futura, los estudiantes no la ven hasta entonces (ADR-143)."),
+    display_end: z.string().nullable().optional().describe("Mostrar hasta (AAAA-MM-DDTHH:mm, hora local del perfil). Ausente o null: sin vencimiento. Tiene que ser posterior a display_start."),
+    notify_without_edit_delay: z.boolean().optional().describe("true = marcar «Enviar notificaciones del tema sin tiempo de espera para edición» (mailnow): Moodle procesa el correo sin esperar maxeditingtime. No es entrega instantánea ni garantizada. Sólo con true explícito; por defecto false."),
 };
 
 async function recipients(ctx: IntentContext, courseId: number, groupId: number): Promise<number | null> {
@@ -412,7 +514,7 @@ export const announcementIntent: WriteIntent<typeof announcementShape> = {
     name: "announcement",
     title: "Plan: publicar un aviso",
     description:
-        "Arma el plan para publicar una discusión nueva en el foro de Avisos (u otro foro del curso): asunto, mensaje convertido a HTML, grupo (por defecto todos) y fijado. No escribe. El correo a los suscriptos lo manda Moodle después de maxeditingtime (30 min por defecto); deshacer antes lo evita.",
+        "Arma el plan para publicar una discusión nueva en el foro de Avisos (u otro foro del curso): asunto, mensaje convertido a HTML, grupo (por defecto todos), fijado y, opcionalmente, período de visualización (display_start/display_end) y «enviar sin demora» (notify_without_edit_delay). No escribe. Sin mailnow, el correo a los suscriptos lo manda Moodle después de maxeditingtime y deshacer antes lo evita; con mailnow, sale en el próximo cron y no se puede retirar.",
     inputShape: announcementShape,
     capability: "post_announcement",
     synthetic_only: false,
@@ -449,15 +551,84 @@ export const announcementIntent: WriteIntent<typeof announcementShape> = {
         const warnings: string[] = [...att.warnings];
         const subscription =
             forum.forcesubscribe === 1 ? "forzada" : forum.forcesubscribe === 2 ? "inicial" : forum.forcesubscribe === 3 ? "deshabilitada" : forum.forcesubscribe === 0 ? "opcional" : "desconocida";
+        // ADR-143: período de visualización y «enviar sin demora». Sin ninguno, el camino REST de siempre.
+        const tz = ctx.profile.read_profile.timezone;
+        const start = input.display_start ? parseLocalDateTime(input.display_start, tz, "display_start") : null;
+        const end = input.display_end ? parseLocalDateTime(input.display_end, tz, "display_end") : null;
+        const notify = input.notify_without_edit_delay === true;
+        const advanced = !!start || !!end || notify;
+        const nowUnix = Math.floor(ctx.now.getTime() / 1000);
+        if (start && end && end.unix <= start.unix) throw new CampusError("WRITE_NOT_ALLOWED", "display_end tiene que ser posterior a display_start.");
+        if (notify && start && start.unix > nowUnix) {
+            // Guarda hasta validar en real cómo trata Moodle mailnow con un inicio futuro: nunca arriesgar la invisibilidad programada.
+            throw new CampusError("WRITE_NOT_ALLOWED", "«Enviar sin demora» con un inicio de visualización futuro todavía no está habilitado (falta validarlo en real con Moodle 5.1.9). Elegí una de las dos opciones.");
+        }
+        if (start && start.unix > nowUnix) warnings.push(`Los estudiantes no ven la discusión hasta el ${start.local} (${tz}). Moodle no manda el correo antes de que empiece la visualización.`);
+        if (end && end.unix <= nowUnix) warnings.push(`El fin de visualización (${end.local}) ya pasó: la discusión nace vencida y sólo la ven quienes pueden ver los posts fuera de período.`);
+        else if (end && end.unix - nowUnix < 3600) warnings.push(`La visualización termina en menos de una hora (${end.local}).`);
+        if (start || end) warnings.push("Moodle interpreta las fechas con la zona horaria de tu cuenta del Campus; la verificación compara el instante guardado con el del plan.");
+        if (advanced) warnings.push("Se publica por el formulario web del Campus (los servicios web no admiten período ni «enviar sin demora»): hace falta la sesión web. Si el formulario no ofrece una opción pedida, no se publica nada.");
         if (forced) warnings.push(`El foro tiene suscripción forzada: ${who === null ? "todos los participantes" : `los ${who} participantes${groupId > 0 ? " del grupo" : ""}`} pueden recibir el aviso por correo.`);
-        warnings.push("El correo sale por cron unos 5 min después de publicar (maxeditingtime de UdeSA, medido; ADR-100). Borrar antes evita el envío.");
-        const base: Risk = forced && !sandbox ? "R3" : "R2";
+        if (notify) warnings.push("«Enviar sin demora» (mailnow): Moodle procesa el correo en el próximo cron, sin la ventana de edición. Es irreversible: borrar después no lo retira de los buzones.");
+        else warnings.push("El correo sale por cron unos 5 min después de publicar (maxeditingtime de UdeSA, medido; ADR-100). Borrar antes evita el envío.");
+        if (advanced && input.subscribe && forced) warnings.push("Con suscripción forzada ya quedás suscripto: la casilla de suscripción no se ofrece y no se envía.");
+        // Con mailnow, el correo es irreversible: R3 aun en el sandbox (humano en el circuito).
+        const base: Risk = notify ? "R3" : forced && !sandbox ? "R3" : "R2";
+        const period = (d: LocalDateTime | null, none: string) => (d ? { local: d.local, utc: d.utc, timezone: tz } : none);
+        const expected = { subject: input.subject, message_text: text, groupid: groupId, pinned: pin, ...(att.files.length ? { attachments: expectedAttachments(att.files) } : {}) };
+        const item: PlanItem = advanced
+            ? {
+                  item_id: "i1",
+                  description: `Nueva discusión «${input.subject}» en el foro ${forum.id} (formulario: ${[start || end ? "período" : null, notify ? "enviar sin demora" : null].filter(Boolean).join(" y ")})`,
+                  call: {
+                      kind: "form" as const,
+                      fn: "forum_post_create_advanced",
+                      params: {
+                          query: { forum: String(forum.id) },
+                          fields: {
+                              subject: input.subject,
+                              "message[text]": html,
+                              "message[format]": "1",
+                              discussionsubscribe: input.subscribe && !forced ? "1" : "0",
+                              pinned: pin ? "1" : "0",
+                              mailnow: notify ? "1" : "0",
+                              // Sin grupos, groupid vacío = todos (-1); con grupos, el selector del formulario.
+                              ...(mode === 0 ? { groupid: "0" } : { groupinfo: String(groupId) }),
+                              ...selectorFields("timestart", start),
+                              ...selectorFields("timeend", end),
+                          },
+                      },
+                  },
+                  target: { course_id: input.course_id, forum_id: forum.id },
+                  expected: { ...expected, timestart: start?.unix ?? 0, timeend: end?.unix ?? 0, mailnow: notify },
+                  ...(att.files.length ? { uploads: { field: "attachments", files: att.files } } : {}),
+              }
+            : {
+                  item_id: "i1",
+                  description: `Nueva discusión «${input.subject}» en el foro ${forum.id}`,
+                  call: {
+                      fn: "mod_forum_add_discussion",
+                      params: {
+                          forumid: forum.id,
+                          subject: input.subject,
+                          message: html,
+                          groupid: groupId,
+                          options: [
+                              { name: "discussionsubscribe", value: input.subscribe ? "1" : "0" },
+                              { name: "discussionpinned", value: pin ? "1" : "0" },
+                          ],
+                      },
+                  },
+                  target: { course_id: input.course_id, forum_id: forum.id },
+                  expected,
+                  ...(att.files.length ? { uploads: { option: "attachmentsid" as const, files: att.files } } : {}),
+              };
         return {
             intent: "announcement",
             capability: "post_announcement",
             course_id: input.course_id,
             base_risk: base,
-            summary: `Publicar el aviso «${input.subject}» en «${forum.name ?? forum.id}» para ${groupId === -1 ? "todos los participantes" : `el grupo «${groupName ?? groupId}»`}${pin ? ", fijado" : ""}.`,
+            summary: `Publicar el aviso «${input.subject}» en «${forum.name ?? forum.id}» para ${groupId === -1 ? "todos los participantes" : `el grupo «${groupName ?? groupId}»`}${pin ? ", fijado" : ""}${start && start.unix > nowUnix ? `, visible desde ${start.local}` : ""}${end ? `, hasta ${end.local}` : ""}${notify ? ", con envío sin demora" : ""}.`,
             payload_preview: {
                 forum: { forum_id: forum.id, name: forum.name ?? null, type: forum.type ?? null, subscription },
                 subject: input.subject,
@@ -468,39 +639,23 @@ export const announcementIntent: WriteIntent<typeof announcementShape> = {
                 discussion_subscribe: input.subscribe ?? false,
                 attachments: attachmentsPreview(att.files),
                 possible_recipients: who,
-                send_now: "no existe por web service: el correo sale después de maxeditingtime",
+                ...(advanced ? { display_start: period(start, "sin inicio: visible enseguida"), display_end: period(end, "sin fin") } : {}),
+                notify_without_edit_delay: notify,
+                transport: advanced ? "formulario web nativo (/mod/forum/post.php), en un solo envío" : "servicio web (mod_forum_add_discussion)",
+                send_now: notify ? "mailnow=1: Moodle procesa el correo sin esperar maxeditingtime. No es entrega garantizada: depende del cron, las suscripciones y los resúmenes." : "no: el correo sale después de maxeditingtime",
             },
             side_effects: [
-                `Visible en el foro para ${groupId === -1 ? "todos los participantes" : "el grupo"}.`,
+                start && start.unix > nowUnix ? `Visible para ${groupId === -1 ? "todos los participantes" : "el grupo"} desde el ${start.local}; antes, sólo para quienes ven los posts fuera de período.` : `Visible en el foro para ${groupId === -1 ? "todos los participantes" : "el grupo"}.`,
                 input.subscribe ? "Quedás suscripto a la discusión: te llegan sus correos." : "No quedás suscripto a la discusión: no te llegan sus correos (subscribe=false, ADR-098).",
-                `Correo a los suscriptos (suscripción ${subscription}) por cron, unos 5 min después (maxeditingtime de UdeSA).`,
+                notify ? `Correo a los suscriptos (suscripción ${subscription}) en el próximo cron, sin ventana de edición (mailnow). Irreversible.` : `Correo a los suscriptos (suscripción ${subscription}) por cron, unos 5 min después (maxeditingtime de UdeSA).`,
                 "Marca el post como leído para la cuenta; puede actualizar la finalización del foro.",
             ],
             preconditions: { description: "La cuenta sigue pudiendo publicar en ese foro y grupo.", versions: { [`can_add:${forum.id}:${groupId}`]: 1 } },
-            undo: { kind: "exacto", how: "Borrar la discusión antes de que pase maxeditingtime evita el correo; después se puede borrar, pero el correo ya salió.", until: null },
+            undo: notify
+                ? { kind: "compensación", how: "Se puede borrar la discusión, pero NO evita el correo: con «enviar sin demora» Moodle lo procesa en el próximo cron.", until: null }
+                : { kind: "exacto", how: "Borrar la discusión antes de que pase maxeditingtime evita el correo; después se puede borrar, pero el correo ya salió.", until: null },
             warnings,
-            items: [
-                {
-                    item_id: "i1",
-                    description: `Nueva discusión «${input.subject}» en el foro ${forum.id}`,
-                    call: {
-                        fn: "mod_forum_add_discussion",
-                        params: {
-                            forumid: forum.id,
-                            subject: input.subject,
-                            message: html,
-                            groupid: groupId,
-                            options: [
-                                { name: "discussionsubscribe", value: input.subscribe ? "1" : "0" },
-                                { name: "discussionpinned", value: pin ? "1" : "0" },
-                            ],
-                        },
-                    },
-                    target: { course_id: input.course_id, forum_id: forum.id },
-                    expected: { subject: input.subject, message_text: text, groupid: groupId, pinned: pin, ...(att.files.length ? { attachments: expectedAttachments(att.files) } : {}) },
-                    ...(att.files.length ? { uploads: { option: "attachmentsid" as const, files: att.files } } : {}),
-                },
-            ],
+            items: [item],
             prior_state: {},
             untrusted_fields: ["payload_preview.forum.name", "payload_preview.group.name"],
             teacher_text: { subject: input.subject, message: input.message },
@@ -526,12 +681,13 @@ const replyShape = {
     subject: z.string().min(1).max(255).optional().describe("Por defecto «Re: <asunto>»."),
     subscribe: z.boolean().optional().describe("Suscribirte a la discusión (te llegan sus correos). Por defecto no (ADR-098)."),
     attachments: z.array(z.string().min(1).max(1000)).max(MAX_PLAN_FILES).optional().describe("Rutas ABSOLUTAS de archivos locales que el humano indicó para adjuntar (nunca archivos «encontrados»). El plan muestra nombre, tamaño y hash; si cambian antes de ejecutar, el plan queda obsoleto."),
+    notify_without_edit_delay: z.boolean().optional().describe("true = «Enviar notificaciones sin tiempo de espera para edición» (mailnow) en esta respuesta: Moodle procesa el correo sin esperar maxeditingtime. No es entrega garantizada. Por defecto false (ADR-143)."),
 };
 
 export const replyIntent: WriteIntent<typeof replyShape> = {
     name: "forum_reply",
     title: "Plan: responder en un foro",
-    description: "Arma el plan para responder en una discusión de un foro del curso (pública o privada). No escribe. Leer la discusión para armar el plan puede marcarla como leída (ADR-039).",
+    description: "Arma el plan para responder en una discusión de un foro del curso (pública o privada), opcionalmente con «enviar sin demora» (notify_without_edit_delay). No escribe. Leer la discusión para armar el plan puede marcarla como leída (ADR-039).",
     inputShape: replyShape,
     capability: "reply_forum",
     synthetic_only: false,
@@ -560,11 +716,31 @@ export const replyIntent: WriteIntent<typeof replyShape> = {
         const att = await planAttachments(ctx, forum, input.attachments, async () => (await canAdd(ctx, forum.id, -1)).cancreateattachment === true);
         // Como el aviso: en un foro de suscripción forzada la respuesta le llega por correo a todo el curso (ADR-130).
         const mailsEveryone = forum.forcesubscribe === 1 && !priv && !ctx.profile.policy.sandbox_course_ids.includes(input.course_id);
+        // ADR-143: «enviar sin demora» sólo por el formulario nativo (la privada con su casilla nativa, verificada al releer).
+        const notify = input.notify_without_edit_delay === true;
+        const expected = { parent_id: parent.id, private: priv, subject, message_text: text, ...(att.files.length ? { attachments: expectedAttachments(att.files) } : {}) };
+        const item: PlanItem = notify
+            ? {
+                  item_id: "i1",
+                  description: `Respuesta al post ${parent.id} (formulario: enviar sin demora)`,
+                  call: { kind: "form", fn: "forum_post_reply_advanced", params: { query: { reply: String(parent.id) }, fields: { subject, "message[text]": html, "message[format]": "1", discussionsubscribe: input.subscribe ? "1" : "0", mailnow: "1", isprivatereply: priv ? "1" : "0" } } },
+                  target: { course_id: input.course_id, forum_id: forum.id, discussion_id: input.discussion_id, parent_id: parent.id },
+                  expected: { ...expected, mailnow: true },
+                  ...(att.files.length ? { uploads: { field: "attachments", files: att.files } } : {}),
+              }
+            : {
+                  item_id: "i1",
+                  description: `Respuesta al post ${parent.id}`,
+                  call: { fn: "mod_forum_add_discussion_post", params: { postid: parent.id, subject, message: html, messageformat: 1, options } },
+                  target: { course_id: input.course_id, forum_id: forum.id, discussion_id: input.discussion_id, parent_id: parent.id },
+                  expected,
+                  ...(att.files.length ? { uploads: { option: "attachmentsid" as const, files: att.files } } : {}),
+              };
         return {
             intent: "forum_reply",
             capability: "reply_forum",
             course_id: input.course_id,
-            base_risk: mailsEveryone ? "R3" : "R2",
+            base_risk: notify || mailsEveryone ? "R3" : "R2",
             summary: `Responder ${priv ? "en privado " : ""}en la discusión «${row.subject ?? row.name ?? input.discussion_id}» al post ${parent.id}.`,
             payload_preview: {
                 forum: { forum_id: forum.id, name: forum.name ?? null },
@@ -576,29 +752,25 @@ export const replyIntent: WriteIntent<typeof replyShape> = {
                 private: priv,
                 discussion_subscribe: input.subscribe ?? false,
                 attachments: attachmentsPreview(att.files),
+                notify_without_edit_delay: notify,
+                ...(notify ? { transport: "formulario web nativo (/mod/forum/post.php), en un solo envío", send_now: "mailnow=1: Moodle procesa el correo sin esperar maxeditingtime. No es entrega garantizada." } : {}),
             },
             side_effects: [
                 priv ? "Visible sólo para la autora del post y quienes pueden leer respuestas privadas." : "Visible para quienes ven la discusión.",
-                "Correo a los suscriptos de la discusión por cron, unos 5 min después (maxeditingtime de UdeSA).",
+                notify ? "Correo a los suscriptos de la discusión en el próximo cron, sin ventana de edición (mailnow). Irreversible." : "Correo a los suscriptos de la discusión por cron, unos 5 min después (maxeditingtime de UdeSA).",
                 input.subscribe ? "Quedás suscripto a la discusión: te llegan sus correos." : "No quedás suscripto a la discusión: no te llegan sus correos (subscribe=false, ADR-098).",
             ],
             preconditions: { description: "El post al que se responde no cambió.", versions: { [`post:${forum.id}:${input.discussion_id}:${parent.id}`]: parent.timemodified ?? null } },
-            undo: { kind: "exacto", how: "Borrar la respuesta antes de que pase maxeditingtime evita el correo; después se puede borrar, pero el correo ya salió.", until: null },
+            undo: notify
+                ? { kind: "compensación", how: "Se puede borrar la respuesta, pero NO evita el correo: con «enviar sin demora» Moodle lo procesa en el próximo cron.", until: null }
+                : { kind: "exacto", how: "Borrar la respuesta antes de que pase maxeditingtime evita el correo; después se puede borrar, pero el correo ya salió.", until: null },
             warnings: [
                 ...(mailsEveryone ? ["El foro tiene suscripción forzada: la respuesta les llega por correo a todos los participantes."] : []),
+                ...(notify ? ["«Enviar sin demora» (mailnow): se publica por el formulario web (hace falta la sesión web); si el formulario no ofrece la opción, no se publica nada. El correo es irreversible. La relectura no expone mailnow: se verifica la respuesta, no la marca."] : []),
                 "Para armar el plan se leyó la discusión completa: en foros con seguimiento, Moodle marca sus posts como leídos (ADR-039).",
                 ...att.warnings,
             ],
-            items: [
-                {
-                    item_id: "i1",
-                    description: `Respuesta al post ${parent.id}`,
-                    call: { fn: "mod_forum_add_discussion_post", params: { postid: parent.id, subject, message: html, messageformat: 1, options } },
-                    target: { course_id: input.course_id, forum_id: forum.id, discussion_id: input.discussion_id, parent_id: parent.id },
-                    expected: { parent_id: parent.id, private: priv, subject, message_text: text, ...(att.files.length ? { attachments: expectedAttachments(att.files) } : {}) },
-                    ...(att.files.length ? { uploads: { option: "attachmentsid" as const, files: att.files } } : {}),
-                },
-            ],
+            items: [item],
             prior_state: {},
             untrusted_fields: ["payload_preview.forum.name", "payload_preview.discussion.subject", "payload_preview.reply_to.author", "payload_preview.reply_to.subject"],
             teacher_text: { subject, message: input.message },
@@ -790,4 +962,120 @@ export const discussionStateIntent: WriteIntent<typeof stateShape> = {
     },
 };
 
-export const FORUM_INTENTS = [announcementIntent, replyIntent, editIntent, discussionStateIntent];
+// ---------- período de visualización de una discusión existente (ADR-143) ----------
+
+const periodShape = {
+    course_id: courseId,
+    discussion_id: z.number().int().positive().describe("discussion_id (no el id del post)."),
+    display_start: z.string().nullable().optional().describe("Mostrar desde (AAAA-MM-DDTHH:mm, hora local del perfil). Ausente = se conserva; null = sin inicio (visible enseguida)."),
+    display_end: z.string().nullable().optional().describe("Mostrar hasta (AAAA-MM-DDTHH:mm, hora local del perfil). Ausente = se conserva; null = sin fin."),
+};
+type PeriodInput = { course_id: number; discussion_id: number; display_start?: string | null; display_end?: string | null };
+
+/** Estado resultante de un extremo: ausente conserva, null quita, texto fija (con minutos: el selector de Moodle no tiene segundos). */
+function resolveEnd(value: string | null | undefined, current: number, tz: string, field: string): LocalDateTime | null {
+    if (value === null) return null;
+    if (value !== undefined) return parseLocalDateTime(value, tz, field);
+    return current ? parseLocalDateTime(formatLocal(current, tz), tz, field) : null;
+}
+
+const visibleAt = (start: number, end: number, now: number) => (start === 0 || start <= now) && (end === 0 || end > now);
+
+async function buildPeriod(input: PeriodInput, ctx: IntentContext, undoOf: string | null): Promise<PlanDraft> {
+    if (input.display_start === undefined && input.display_end === undefined) throw new CampusError("WRITE_NOT_ALLOWED", "Sin cambios: indicá display_start, display_end o los dos (null quita ese extremo).");
+    const { forum, row } = await locateDiscussion(ctx, input.course_id, input.discussion_id);
+    const mine = await me(ctx);
+    // Empezamos por discusiones propias (edit_own_post): editar el primer post de otra persona es moderación.
+    if (row.userid !== mine) throw new CampusError("WRITE_NOT_ALLOWED", "Sólo se puede cambiar el período de discusiones que publicaste vos (capacidad edit_own_post).");
+    const tz = ctx.profile.read_profile.timezone;
+    const cur = { start: row.timestart ?? 0, end: row.timeend ?? 0 };
+    const start = resolveEnd(input.display_start, cur.start, tz, "display_start");
+    const end = resolveEnd(input.display_end, cur.end, tz, "display_end");
+    const next = { start: start?.unix ?? 0, end: end?.unix ?? 0 };
+    if (next.start && next.end && next.end <= next.start) throw new CampusError("WRITE_NOT_ALLOWED", "El período resultante no es válido: el fin tiene que ser posterior al inicio.");
+    if (next.start === cur.start && next.end === cur.end) throw new CampusError("WRITE_NOT_ALLOWED", "Sin cambios: el período pedido es el que ya tiene la discusión.");
+    const now = Math.floor(ctx.now.getTime() / 1000);
+    const warnings: string[] = ["Se cambia por el formulario de edición del primer post (los servicios web no admiten el período): hace falta la sesión web. Asunto, mensaje, grupo, fijado, suscripción y adjuntos se reenvían tal como los sirve Moodle y la verificación comprueba que no cambien."];
+    const wasVisible = visibleAt(cur.start, cur.end, now);
+    const willBeVisible = visibleAt(next.start, next.end, now);
+    if (wasVisible && !willBeVisible) warnings.push("La discusión hoy es visible para los estudiantes y deja de serlo con este cambio.");
+    if (!wasVisible && willBeVisible) warnings.push("La discusión pasa a ser visible ya: si Moodle todavía no había mandado su correo, puede salir en el próximo cron.");
+    if (next.end && next.end > now && next.end - now < 3600) warnings.push("La visualización termina en menos de una hora.");
+    if ((input.display_start === undefined && cur.start % 60) || (input.display_end === undefined && cur.end % 60)) warnings.push("El extremo que se conserva tenía segundos; el selector de Moodle trabaja con minutos, así que se guarda redondeado al minuto.");
+    warnings.push("Moodle interpreta las fechas con la zona horaria de tu cuenta del Campus; la verificación compara el instante guardado con el del plan.");
+    const first = (await postsOf(ctx, input.course_id, forum.id, row.discussion)).find((p) => p.id === row.id);
+    const show = (unix: number, none: string) => (unix ? { local: formatLocal(unix, tz), utc: new Date(unix * 1000).toISOString(), timezone: tz } : none);
+    return {
+        intent: "forum_display_period",
+        capability: "edit_own_post",
+        course_id: input.course_id,
+        base_risk: "R2",
+        summary: `${undoOf ? "Deshacer: restaurar" : "Cambiar"} el período de visualización de la discusión «${row.subject ?? row.name ?? row.discussion}»: ${next.start ? `desde ${formatLocal(next.start, tz)}` : "sin inicio"}, ${next.end ? `hasta ${formatLocal(next.end, tz)}` : "sin fin"}.`,
+        payload_preview: {
+            forum: { forum_id: forum.id, name: forum.name ?? null },
+            discussion: { discussion_id: row.discussion, first_post_id: row.id, subject: row.subject ?? row.name ?? null },
+            before: { display_start: show(cur.start, "sin inicio"), display_end: show(cur.end, "sin fin") },
+            after: { display_start: show(next.start, "sin inicio"), display_end: show(next.end, "sin fin") },
+            visible_now: { before: wasVisible, after: willBeVisible },
+            notify_without_edit_delay: "no aplica: editar no reenvía el correo",
+        },
+        side_effects: [
+            willBeVisible ? "Visible para los estudiantes según el nuevo período." : "No visible para los estudiantes fuera del nuevo período (sí para quienes pueden ver posts fuera de período).",
+            "No cambia asunto, mensaje, grupo, fijado, suscripción ni adjuntos. Moodle registra la edición del post.",
+        ],
+        preconditions: { description: "El período y el primer post no cambiaron desde que se armó el plan.", versions: { [`period:${forum.id}:${row.discussion}`]: periodVersion(row) } },
+        undo: { kind: "compensación", how: "Un plan compensatorio restaura el período anterior. No revierte la visibilidad que ya ocurrió ni un correo que Moodle ya haya procesado.", until: null },
+        warnings,
+        items: [
+            {
+                item_id: "i1",
+                description: `Período de la discusión ${row.discussion} (primer post ${row.id})`,
+                call: { kind: "form", fn: "forum_post_edit_display_period", params: { query: { edit: String(row.id) }, fields: { ...selectorFields("timestart", start), ...selectorFields("timeend", end) } } },
+                target: { course_id: input.course_id, forum_id: forum.id, discussion_id: row.discussion, post_id: row.id },
+                expected: {
+                    timestart: next.start,
+                    timeend: next.end,
+                    prior_timestart: cur.start,
+                    prior_timeend: cur.end,
+                    keep: { subject: row.subject ?? row.name ?? null, message_text: comparable(row.message), pinned: row.pinned ?? false, groupid: row.groupid ?? null, attachments: observedAttachments(first) },
+                },
+            },
+        ],
+        prior_state: { timestart: cur.start, timeend: cur.end },
+        untrusted_fields: ["payload_preview.forum.name", "payload_preview.discussion.subject"],
+        teacher_text: {},
+        undo_of: undoOf,
+    };
+}
+
+export const displayPeriodIntent: WriteIntent<typeof periodShape> = {
+    name: "forum_display_period",
+    title: "Plan: período de visualización de una discusión",
+    description:
+        "Arma el plan para cambiar o quitar el período de visualización (mostrar desde / hasta) de una discusión propia existente. Ausente conserva ese extremo, null lo quita, una fecha AAAA-MM-DDTHH:mm (hora local del perfil) lo fija. Va por el formulario de edición del primer post y no toca nada más. No escribe.",
+    inputShape: periodShape,
+    capability: "edit_own_post",
+    synthetic_only: false,
+    ...common,
+
+    async plan(input, ctx) {
+        return buildPeriod(input, ctx, null);
+    },
+
+    async undo(plan, result, ctx) {
+        const r = result.items.find((i) => i.outcome === "verificado" || i.outcome === "con_diferencias" || i.outcome === "desconocido");
+        const item = r && plan.items.find((i) => i.item_id === r.item_id);
+        if (!r || !item) return { kind: "ninguno", reason: "La acción no aplicó cambios." };
+        const prior = plan.prior_state as { timestart: number; timeend: number };
+        // El deshacer parte del estado que dejó esta acción: si alguien cambió el período después, no se pisa.
+        const { row } = await locateDiscussion(ctx, plan.course_id, Number(item.target.discussion_id));
+        if ((row.timestart ?? 0) !== item.expected.timestart || (row.timeend ?? 0) !== item.expected.timeend) {
+            return { kind: "ninguno", reason: "El período cambió después de esta acción: no se restaura para no pisar ese cambio. Revisalo y armá un plan nuevo si hace falta." };
+        }
+        const tz = ctx.profile.read_profile.timezone;
+        const draft = await buildPeriod({ course_id: plan.course_id, discussion_id: Number(item.target.discussion_id), display_start: prior.timestart ? formatLocal(prior.timestart, tz) : null, display_end: prior.timeend ? formatLocal(prior.timeend, tz) : null }, ctx, result.action_id);
+        return { kind: "plan", draft };
+    },
+};
+
+export const FORUM_INTENTS = [announcementIntent, replyIntent, editIntent, discussionStateIntent, displayPeriodIntent];

@@ -152,6 +152,7 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [140](#adr-140--vista-previa-de-cambios-de-texto-enriquecido) | Vista previa de cambios de texto enriquecido | adoptada |
 | [141](#adr-141--renovación-de-la-conexión-web-del-remoto-desde-un-panel-privado) | Renovación de la conexión web del remoto desde un panel privado | adoptada |
 | [142](#adr-142--conexión-web-del-mcp-local-con-el-modelo-del-remoto) | Conexión web del MCP local con el modelo del remoto | adoptada |
+| [143](#adr-143--foros-período-de-visualización-y-enviar-sin-demora) | Foros: período de visualización y «enviar sin demora» | adoptada; pruebas reales de escritura pendientes |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -2827,3 +2828,85 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
   - sin login automático;
   - cierre por inactividad.
 - Ajuste en `web-autologin.test.ts`: las dos llaves sobre `LocalConnection.wire`. Las pruebas de ADR-141 siguen pasando sin cambios.
+
+## ADR-143 · Foros: período de visualización y «enviar sin demora»
+
+**Fecha:** 2026-11-22 · **Estatus:** adoptada; pruebas reales de escritura pendientes de una autorización aparte del dueño · **Origen:** directiva `DIRECTIVA_MCP_FOROS_PROGRAMACION_Y_NOTIFICACION.md`: programar el «Mostrar inicio / final» de una discusión y marcar «Enviar notificaciones del tema sin tiempo de espera para edición».
+
+**Hecho decisivo (Moodle 5.1.9):**
+- `mod_forum_add_discussion` fuerza `timestart=0`, `timeend=0` y `mailnow=0` y no los admite en `options`.
+- `mod_forum_update_discussion_post` no admite timed posts.
+- El formulario nativo `/mod/forum/post.php` (`mod_forum_post_form`) sí los admite:
+  - `mailnow`, sólo al **crear** y con `moodle/course:manageactivities` (o `canmailnow` en foros de preguntas);
+  - `timestart` y `timeend` como selectores opcionales, sólo en el primer post y con timed posts habilitados más `viewhiddentimedposts`. Sin eso, el formulario los reemplaza por campos ocultos fijos en 0;
+  - `isprivatereply`, una casilla nativa para la respuesta privada.
+- Después de crear una discusión, el formulario redirige a `view.php?f=<foro>`, sin el id de la discusión.
+
+**Decisión:**
+- **`campus_plan_announcement`** suma tres opciones:
+  - `display_start` y `display_end`, en formato `AAAA-MM-DDTHH:mm` en la hora local del perfil, sin zona;
+  - `notify_without_edit_delay`, sólo con `true` explícito.
+
+  Sin ninguna, sigue el camino REST de siempre, con la misma llamada y los mismos valores por defecto. Con alguna, **un único formulario nativo** crea la discusión con todo junto: asunto, HTML, grupo, fijado, suscripción, adjuntos, período y `mailnow`. Está prohibido «crear por REST y después editar», porque dejaría una publicación visible o un correo intermedios.
+- **`campus_plan_forum_reply`** suma `notify_without_edit_delay`. Con `true` va por el formulario de respuesta. La privada usa la casilla nativa `isprivatereply`, se exige que esté ofrecida y se verifica al releer: nunca se convierte en pública.
+- **`campus_plan_forum_display_period`** (intención nueva, capacidad `edit_own_post`) cambia o quita el período de una discusión **propia**:
+  - un extremo ausente se conserva, `null` lo quita y una fecha lo fija;
+  - el par resultante se valida y «sin cambios» se rechaza;
+  - va por el formulario de edición del primer post y reenvía todo lo demás tal como lo sirve Moodle;
+  - la relectura comprueba que asunto, mensaje, fijado, grupo y adjuntos no cambiaron;
+  - el deshacer es un plan compensatorio que restaura el período anterior, y no se ofrece si alguien cambió el período después.
+- **Allowlist:** tres formularios tipados, `forum_post_create_advanced`, `forum_post_edit_display_period` y `forum_post_reply_advanced`, con query exacta (`forum`, `edit` o `reply`) y campos con validador. Sigue sin haber ruta, `sesskey` ni campo libre.
+- **Controles ofrecidos (nuevo en `WebWriter`):**
+  - `required_controls` y `controls_when_set` exigen que el formulario servido ofrezca **habilitado** cada control pedido: no oculto, no congelado ni deshabilitado;
+  - si falta, se responde `MOODLE_PERMISSION_DENIED` (`control_not_offered`) **sin POST**;
+  - nunca se degrada una programación a una publicación inmediata, ni «sin demora» a un envío normal.
+  - Casillas en 0: se omiten, como hace el navegador (`omit_when_zero`).
+- **Fechas:**
+  - se valida calendario real, minuto y rango 2000–2050 (el selector real va de 1900 a 2050, en pasos de un minuto);
+  - la conversión usa la zona del perfil, no la del proceso;
+  - el plan muestra la hora local y el instante UTC;
+  - `display_end` tiene que ser estrictamente posterior a `display_start`.
+- **Verificación:**
+  - la relectura (`mod_forum_get_forum_discussions`, con su esquema ampliado) compara `timestart`, `timeend` y `mailnow` del primer post, como evidencia de **aceptación**, no de entrega;
+  - una discusión creada por formulario se ubica por autor, asunto, contenido y ventana temporal. Con más de una coincidencia, el resultado queda **desconocido** y no se reintenta;
+  - para las respuestas, la lectura de posts no expone `mailnow`: la nota lo dice.
+- **Riesgo y deshacer:**
+  - `mailnow` sube el plan a **R3** aun en el sandbox, con humano en el circuito;
+  - el deshacer por borrado sigue disponible, pero dice que **no evita el correo** y no anuncia una ventana;
+  - la guarda `allow_participant_notifications` (`assertNoParticipantMail`) sigue valiendo sin excepción.
+- **Inicio futuro + «sin demora»:** se rechaza en el plan hasta validarlo en real. El código de Moodle indica que el correo espera al inicio, pero la directiva pide no asumirlo.
+
+**Ajustes justificados respecto de la directiva:**
+- Al crear, el grupo va por `groupinfo` en foros con grupos y por `groupid` vacío (= todos) en foros sin grupos, que no ofrecen el selector: es la lógica de `post.php`.
+- En un foro con suscripción forzada, `subscribe=true` no se envía: la casilla está congelada y el autor ya está suscripto. El plan lo avisa.
+- La privada rápida se habilitó, en lugar de rechazarse, porque el formulario tiene la casilla nativa y la relectura confirma que quedó privada.
+- Un extremo conservado con segundos se reenvía redondeado al minuto (el selector no tiene segundos), con aviso en el plan.
+
+**Validación del formulario real (sólo lectura, 22/11/2026):** un GET del formulario de alta de un foro de prueba del sandbox, con una sesión local (no se envió nada) confirmó:
+- el marcador `_qf__mod_forum_post_form`;
+- los controles `mailnow`, `pinned`, `discussionsubscribe` (marcada por defecto), `timestart[…]` y `timeend[…]` con `[enabled]`, y el botón `submitbutton`;
+- `attachments` como borrador y `message[format]` oculto.
+
+**Límites:**
+- Moodle interpreta las fechas en la zona horaria de la cuenta del Campus. Si difiere de la del perfil, la verificación lo marca como diferencia, pero la publicación ya ocurrió con ese instante.
+- `mailnow` acelera el procesamiento; la entrega depende del cron, las suscripciones y los resúmenes.
+- Faltan las pruebas reales de escritura (alta programada, «sin demora», edición del período, respuesta rápida): esperan la autorización aparte del dueño.
+
+**Tests:** `write-forum-period.test.ts` (21):
+- **Fechas:** formato, calendario, rango y zona.
+- **Regresión:** sin opciones nuevas, el camino REST.
+- **Período:** sólo inicio, sólo fin, ambos y validación del par.
+- **Timed posts deshabilitados:** rechazo sin POST.
+- **`mailnow`:** R3, deshacer veraz, casilla no ofrecida y combinación con inicio futuro.
+- **Guarda de no notificar.**
+- **Formulario:** grupos, fijado, suscripción y adjuntos; 200 con errores; corte después del POST sin repetir; coincidencia ambigua.
+- **Seguridad de la allowlist.**
+- **Respuesta rápida:** pública y privada; sin la casilla privada ofrecida, rechazo.
+- **Edición del período:**
+  - conservar o quitar un extremo, con contenido y adjuntos intactos;
+  - «sin cambios», par inválido y discusión ajena;
+  - deshacer y no pisar un cambio posterior;
+  - plan obsoleto por un cambio concurrente;
+  - sin timed posts.
+
+Además, `fake-forum` simula `/mod/forum/post.php`.
