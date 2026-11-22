@@ -118,6 +118,8 @@ export interface WriteAppDeps {
     now?: () => Date;
     webSource?: WebSessionSource;
     webRenewHint?: string;
+    /** Local (ADR-142): AUTH_REQUIRED de la sesión web con la acción tipada de esta PC. */
+    webAuthError?: (reason: "session_missing" | "session_expired") => Promise<import("../errors.js").CampusError | null>;
     /** User-Agent de las peticiones web (ADR-121). */
     webUserAgent?: string;
     loginHint?: string;
@@ -142,6 +144,7 @@ export function createWriteApp(deps: WriteAppDeps) {
         now: deps.now,
         webSource: deps.webSource,
         webRenewHint: deps.webRenewHint,
+        webAuthError: deps.webAuthError,
         webUserAgent: deps.webUserAgent,
         loginHint: deps.loginHint,
         downloadDir: deps.downloadDir ?? null,

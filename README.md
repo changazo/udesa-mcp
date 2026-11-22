@@ -41,20 +41,20 @@ Cada resultado trae procedencia, cobertura y advertencias. Un error nunca se pre
 - No hay aprobación fuera del chat (ADR-061). Para R3 y R4 decide el humano: el agente le plantea la acción y sólo ejecuta con su aprobación, o el servidor se la pregunta por elicitación (ADR-118).
 - Notificaciones a participantes permitidas (`allow_participant_notifications: true`, ADR-130). Publicar o responder en Avisos (suscripción forzada) de un curso real y mandar un mensaje privado son R3: el agente te pide aprobación antes. Las calificaciones de tareas y foros solicitan aviso por defecto; se puede desactivar por plan. Con `false`, sólo se notifica a las cuentas de prueba de tu sandbox (`notifiable_user_ids`, ADR-115 y 120). El perfil publicado trae esa lista y la del sandbox vacías: se completan con los tuyos ([PROCESOS.md](docs/PROCESOS.md#escrituras)).
 
-**Sesión web automática** (opcional, no recomendada; ADR-087, ADR-088 y ADR-127). Donde el keepalive no es viable, el MCP local y el remoto pueden iniciar sesión en la web solos, con la contraseña guardada y un dispositivo de confianza de 28 días (el MFA por correo se pide sólo al activarlo o renovarlo). En el remoto, la renovación es desde el navegador, en el panel privado `/admin/conexion`: el código del correo se escribe ahí, nunca en el chat (ADR-141).
+**Sesión web automática** (método recomendado en la PC desde ADR-142; ADR-088 y ADR-127). El MCP local y el remoto inician sesión en la web solos, con la contraseña guardada y un dispositivo de confianza de 28 días (el MFA por correo se pide sólo al activarlo o renovarlo). En la PC, la confianza se renueva con un panel local en el navegador (`auth web panel`) o desde la terminal; importar la cookie `MoodleSession` queda como respaldo. En el remoto, la renovación es desde el navegador, en el panel privado `/admin/conexion`: el código del correo se escribe ahí, nunca en el chat (ADR-141).
 
 ## Cómo funciona
 
-- Login **nativo** (usuario/contraseña → `login/token.php`) ejecutado por el humano en su terminal. La contraseña no se guarda; el token va al almacén seguro del sistema (Administrador de credenciales en Windows). Excepción opcional y no recomendada: el login web automático guarda la contraseña en ese mismo almacén, y sólo si lo activás vos (ADR-088, [PROCESOS.md](docs/PROCESOS.md#login-web-automático-opcional-no-recomendado)).
+- Login **nativo** (usuario/contraseña → `login/token.php`) ejecutado por el humano en su terminal. La contraseña no se guarda; el token va al almacén seguro del sistema (Administrador de credenciales en Windows). Excepción: el login web automático (método recomendado para la sesión web en la PC, ADR-142) guarda la contraseña en ese mismo almacén, y sólo si lo activás vos ([PROCESOS.md](docs/PROCESOS.md#login-web-automático-en-la-pc-recomendado)).
 - Valida el token con `core_webservice_get_site_info` (sitio + `userid`) antes de guardarlo.
 - Reporte de capacidades con cuatro dimensiones: anuncio del servicio, implementación local, política local y prueba en contexto.
 - Alcance verificado antes de cada consulta: curso permitido → rol en ese curso (los datos de terceros exigen rol docente o superior) → actividad del curso → participante matriculado. Los Avisos se detectan por `type=news`, nunca por un ID inventado.
 - El servidor de lectura (`serve`, `/mcp`, perfil `docente-lectura`) **no** registra herramientas de escritura; las escrituras están en `docente-completo` (`serve-full`, `/mcp-completo`) o en `serve-write` / `/mcp-escritura` (ADR-044, ADR-062). Ningún servidor expone una tool genérica de `wsfunction`, AJAX ni URL, no llama funciones `*_view_*`, no lee Gmail ni automatiza Google. Única excepción aceptada sobre el estado de lectura: al leer un hilo completo (o buscar en respuestas) de un foro con seguimiento de no leídos, Moodle marca esos posts como leídos para tu cuenta; la respuesta lo declara y `avoid_mark_read` lo evita (ADR-039). Listar avisos y leer los adjuntos del primer post no marca nada. Las operaciones con efectos laterales están auditadas una por una ([docs/HERRAMIENTAS.md](docs/HERRAMIENTAS.md#operaciones-admitidas-y-efectos-auditados)).
 - Login **browser** (Google institucional): `auth login --method browser` abre tu navegador normal, hacés el login con Google y pegás en la terminal el enlace de retorno. El retorno automático para Windows (`auth handler install`) está **en pausa**: funciona en un Chrome limpio, pero no en todos los perfiles de Chrome. Paso a paso: [docs/LOGIN_GOOGLE.md](docs/LOGIN_GOOGLE.md); diseño: [docs/AUTH_BROWSER.md](docs/AUTH_BROWSER.md).
 - **Sesión web** opcional para las lecturas que el servicio móvil no ofrece. Hay tres formas de tenerla:
-  - importar la cookie `MoodleSession` (el humano);
-  - mantenerla viva con el keepalive;
-  - con el login web automático (opcional, no recomendado; ADR-088 y ADR-127).
+  - con el login web automático (método recomendado en la PC; ADR-142);
+  - importar la cookie `MoodleSession` (respaldo; también desde el portapapeles con `--clipboard`);
+  - mantener viva una cookie importada con el keepalive.
 
   Sin sesión web, esas herramientas devuelven `AUTH_REQUIRED` y el resto funciona igual.
 
@@ -90,10 +90,11 @@ node build/cli.js diagnose      --profile udesa-docente [--appsitecheck]
 node build/cli.js serve         --profile udesa-docente                   # lo inicia el cliente MCP (sólo lectura)
 node build/cli.js serve-full    --profile docente-completo                # lecturas + escrituras; exige CAMPUS_WRITE_ENABLED=true
 node build/cli.js auth logout   --profile udesa-docente --local           # borra local; NO revoca en Moodle
-node build/cli.js auth web import --profile udesa-docente                 # sesión web (cookie MoodleSession, entrada oculta)
+node build/cli.js auth web panel --profile udesa-docente                  # panel de conexión de esta PC (127.0.0.1): renovar la confianza con el código
+node build/cli.js auth web import --profile udesa-docente [--clipboard]   # respaldo: cookie MoodleSession (entrada oculta o portapapeles)
 node build/cli.js auth web status --profile udesa-docente [--verify]      # --verify también mide el límite de inactividad
 node build/cli.js auth web keepalive [install|uninstall|status] --profile udesa-docente   # mantener viva la sesión web
-node build/cli.js auth web autologin [enable|disable|status] --profile udesa-docente     # login web automático (opcional, no recomendado)
+node build/cli.js auth web autologin [enable|disable|status] --profile udesa-docente     # login web automático (método recomendado en la PC)
 node build/cli.js remote push-token        --profile udesa-docente        # token móvil del keyring → Vercel
 node build/cli.js remote autologin renew --profile udesa-docente --redeploy   # recuperación desde la PC (ADR-141): un código, publica CAMPUS_WEB_BOOTSTRAP y despliega; verificar en /admin/conexion
 node build/cli.js remote autologin [disable|deploy|status] --profile udesa-docente  # corte explícito, reintento de deploy, historial local

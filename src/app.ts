@@ -13,6 +13,7 @@ import type { SecretStore } from "./session/secret-store.js";
 import { SessionManager } from "./session/session-manager.js";
 import type { Logger } from "./util/logger.js";
 import type { WebSessionSource } from "./web/session.js";
+import type { CampusError } from "./errors.js";
 import { WebTransport } from "./web/transport.js";
 
 /** Raíz de composición: una sola implementación de dominio para cualquier método de login. */
@@ -28,6 +29,8 @@ export interface AppDeps {
     webSource?: WebSessionSource;
     /** Cómo renovar la sesión web en este modo (local: CLI; remoto: configuración). */
     webRenewHint?: string;
+    /** Local (ADR-142): AUTH_REQUIRED de la sesión web con la acción tipada de esta PC. */
+    webAuthError?: (reason: "session_missing" | "session_expired") => Promise<CampusError | null>;
     /** Carpeta de descargas de campus_get_original_file (sólo servidores locales; ADR-112). */
     downloadDir?: string | null;
     /** Conversores locales para render de páginas (ADR-112). */
@@ -55,6 +58,7 @@ export function createApp(deps: AppDeps) {
               fetch: deps.fetch,
               renewHint: deps.webRenewHint ?? "Importá la sesión web del Campus con la CLI.",
               userAgent: deps.webUserAgent,
+              authError: deps.webAuthError,
           })
         : null;
     const service = new CampusService({ profile: deps.profile, session, registry, scope, recorder, logger: deps.logger, now: deps.now, web, linkCheck: deps.linkCheck });

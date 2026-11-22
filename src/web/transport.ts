@@ -25,6 +25,11 @@ export interface WebTransportOptions {
      * código y lo guarda con el acceso, así se reconoce que es el MCP. Por defecto, el local.
      */
     userAgent?: string;
+    /**
+     * Local (ADR-142): cuando no hay sesión, o la sesión venció y no hubo login automático que la
+     * renovara, el AUTH_REQUIRED lleva la acción tipada de esta PC (comando exacto) en lugar del texto fijo.
+     */
+    authError?: (reason: "session_missing" | "session_expired") => Promise<CampusError | null>;
 }
 
 /** Identificación honesta del cliente web: qué es y desde dónde corre. */
@@ -111,15 +116,44 @@ export class WebTransport {
             loggedIn = true;
         }
         if (!snapshot) {
-            throw new CampusError("AUTH_REQUIRED", "No hay sesión web del Campus configurada para esta operación.", { humanAction: this.opts.renewHint });
+            throw (await this.mappedAuthError("session_missing")) ?? new CampusError("AUTH_REQUIRED", "No hay sesión web del Campus configurada para esta operación.", { humanAction: this.opts.renewHint });
         }
+        let op: WebOperation;
         try {
-            return await this.openWith(snapshot);
+            op = await this.openWith(snapshot);
         } catch (e) {
             // Sesión guardada vencida: un único login automático y un único reintento. Si lo que falló
             // es el token móvil (de ahí sale la identidad esperada), un login web no lo arregla.
-            if (!(e instanceof CampusError) || e.code !== "AUTH_REQUIRED" || !this.autoLogin || loggedIn || e.details?.component === "mobile_token") throw e;
-            return this.openWith(await this.autoLogin.login());
+            const sessionExpired = e instanceof CampusError && e.code === "AUTH_REQUIRED" && e.details?.component !== "mobile_token" && !(e.details && "recovery" in e.details);
+            if (!sessionExpired || !this.autoLogin || loggedIn) {
+                if (sessionExpired && !this.autoLogin) throw (await this.mappedAuthError("session_expired")) ?? e;
+                throw e;
+            }
+            // Otro proceso pudo haber publicado una sesión nueva mientras esta operación usaba la vencida
+            // (registro compartido, ADR-141/142): se prueba esa antes de iniciar otro login.
+            const fresh = await this.opts.source.load().catch(() => null);
+            if (fresh && fresh.revision !== snapshot.revision) {
+                try {
+                    op = await this.openWith(fresh);
+                    if (this.opts.source.touch) await this.opts.source.touch(op.baseRevision ?? null).catch(() => undefined);
+                    return op;
+                } catch (e2) {
+                    if (!(e2 instanceof CampusError) || e2.code !== "AUTH_REQUIRED") throw e2;
+                }
+            }
+            op = await this.openWith(await this.autoLogin.login());
+        }
+        // Local: último uso de la sesión (para estimar su vencimiento por inactividad). Nunca bloquea la operación.
+        if (this.opts.source.touch) await this.opts.source.touch(op.baseRevision ?? null).catch(() => undefined);
+        return op;
+    }
+
+    private async mappedAuthError(reason: "session_missing" | "session_expired"): Promise<CampusError | null> {
+        if (!this.opts.authError) return null;
+        try {
+            return await this.opts.authError(reason);
+        } catch {
+            return null;
         }
     }
 

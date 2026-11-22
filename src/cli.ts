@@ -13,13 +13,18 @@ import { packageRoot } from "./config/profile.js";
 import { spawn } from "node:child_process";
 import { buildCapabilityReport } from "./capabilities/report.js";
 import { promptHidden, promptVisible, requireTty } from "./cli/prompt.js";
-import { webAutologinCommand, wireAutoLogin } from "./cli/web-autologin.js";
+import { webAutologinCommand } from "./cli/web-autologin.js";
+import type { Clipboard } from "./cli/clipboard.js";
+import { webImport, webPanel } from "./cli/web-local.js";
+import { LocalConnection } from "./web/local-connection.js";
+import { windowsCodePrompt } from "./web/code-prompt.js";
+import type { SessionManager } from "./session/session-manager.js";
 import { pushWebSessionRefusal, remoteAutologinCommand } from "./cli/remote-autologin.js";
 import { loadProfile, type Profile } from "./config/profile.js";
 import { CampusError, toPublicError } from "./errors.js";
 import { defaultStateDir, FileMetadataStore } from "./session/metadata.js";
 import { KeyringSecretStore } from "./session/secret-store.js";
-import { encodeSnapshot, KeyringWebSessionSource, parseCookieInput, webSecretAccount, type WebSessionSource } from "./web/session.js";
+import { encodeSnapshot, parseCookieInput } from "./web/session.js";
 import { createLogger } from "./util/logger.js";
 import { checkWebSession, humanDuration, readWebState, recordCheck, recordPublished, remoteInSync } from "./web/keepalive.js";
 import { currentWindowsUser, defaultConhost, installKeepaliveTask, keepaliveArguments, keepaliveTaskStatus, taskName, uninstallKeepaliveTask, validateEvery, type KeepaliveTarget } from "./web/keepalive-task.js";
@@ -41,11 +46,12 @@ Uso:
   campus profile check --profile <id>
   campus auth copy    --profile <destino> --from <origen>   # reutiliza el token del keyring sin pedir contraseña
   campus auth handler install|uninstall|status [--scheme udesacampusmcp]   # retorno automático del login con Google (Windows)
-  campus auth web import --profile <id>   # sesión web del Campus (cookie MoodleSession) para lecturas que la requieren; entrada oculta o stdin
+  campus auth web panel --profile <id> [--no-open]   # panel de conexión de esta PC (127.0.0.1): renovar la confianza con el código del correo (ADR-142)
+  campus auth web import --profile <id> [--clipboard] [--open]   # respaldo: cookie MoodleSession del navegador (entrada oculta, stdin o portapapeles)
   campus auth web status --profile <id> [--verify]   # con --verify: renueva y mide el límite de inactividad
   campus auth web keepalive --profile <id> [--quiet]   # mantiene viva la sesión web (una lectura de identidad)
   campus auth web keepalive install|uninstall|status --profile <id> [--every <min>]   # tarea programada de Windows (opcional)
-  campus auth web autologin enable|disable|status --profile <id>   # login web automático con contraseña guardada (OPCIONAL, NO RECOMENDADO; ADR-088)
+  campus auth web autologin enable|disable|status --profile <id>   # login web automático con contraseña guardada (método RECOMENDADO en la PC; ADR-142)
   campus auth web logout --profile <id> --local
 
 Servidor remoto privado (Vercel, ver docs/REMOTO_VERCEL.md):
@@ -97,6 +103,8 @@ async function main(argv: string[]): Promise<number> {
             scheme: { type: "string" },
             idp: { type: "string" },
             "no-open": { type: "boolean" },
+            open: { type: "boolean" },
+            clipboard: { type: "boolean" },
             every: { type: "string" },
             quiet: { type: "boolean" },
             since: { type: "string" },
@@ -121,17 +129,22 @@ async function main(argv: string[]): Promise<number> {
     const profile = loadProfile({ profileId: values.profile, profileFile: values["profile-file"] });
     const logger = createLogger(undefined, process.env.CAMPUS_LOG_LEVEL === "debug" ? "debug" : cmd === "serve" ? "info" : "warn");
     const metadata = new FileMetadataStore(defaultStateDir(), profile.profile_id);
-    const webSource = new KeyringWebSessionSource(new KeyringSecretStore(), webSecretAccount(profile.profile_id, profile.site_url));
+    let appRef: App | null = null;
+    // ADR-142: la conexión web de esta PC es un registro v2 (el mismo modelo que el remoto). Los servidores exigen la segunda llave.
+    const local = localConnection(profile, metadata, logger, { requireSecondKey: cmd === "serve", askCode: cmd === "serve" ? windowsCodePrompt() : null }, () => appRef!.session);
+    const webSource = local.source();
     const app = createApp({
         profile,
         secrets: new KeyringSecretStore(),
         metadata,
         logger,
         webSource,
-        webRenewHint: `Importá una sesión web nueva: ${cliCommand()} auth web import --profile ${profile.profile_id}`,
+        webRenewHint: webRenewHint(profile.profile_id),
+        webAuthError: (r) => local.authError(r),
         downloadDir: defaultDownloadDir(),
         renderer: findRenderer(),
     });
+    appRef = app;
 
     switch (`${cmd}${sub ? ` ${sub}` : ""}`) {
         case "auth login":
@@ -171,11 +184,11 @@ async function main(argv: string[]): Promise<number> {
             return 0;
         }
         case "auth web":
-            return authWeb(arg, app, webSource, metadata, profile, { verify: !!values.verify, local: !!values.local, quiet: !!values.quiet, every: values.every, action: positionals[3], profileFile: values["profile-file"] });
+            return authWeb(arg, app, local, metadata, profile, { verify: !!values.verify, local: !!values.local, quiet: !!values.quiet, every: values.every, action: positionals[3], profileFile: values["profile-file"], clipboard: !!values.clipboard, open: !!values.open, noOpen: !!values["no-open"] });
         case "diagnose":
             return diagnose(profile, app, metadata, !!values.appsitecheck);
         case "serve": {
-            if (app.web) await wireAutoLogin({ web: app.web, source: webSource, secrets: new KeyringSecretStore(), metadata, profileId: profile.profile_id, siteUrl: profile.site_url, logger, serverDeps: app.serverDeps });
+            if (app.web) await wireLocal(local, app.web, app.serverDeps, logger);
             const server = app.server();
             await server.connect(new StdioServerTransport());
             logger.log("info", "server_started", { profile_id: profile.profile_id, read_only: profile.read_only });
@@ -373,6 +386,14 @@ interface AuthWebOptions {
     action: string | undefined;
     /** `--profile-file` del comando: la tarea programada usa el mismo. */
     profileFile: string | undefined;
+    /** `import --clipboard`: leer la cookie del portapapeles y vaciarlo después (ADR-142). */
+    clipboard?: boolean;
+    /** `import --open`: abrir el Campus en el navegador antes de pedir la cookie. */
+    open?: boolean;
+    /** `panel --no-open`: no abrir el navegador (se muestra el enlace). */
+    noOpen?: boolean;
+    /** Portapapeles inyectable (tests). */
+    clipboardImpl?: Clipboard;
 }
 
 /** Perfil y estado del comando actual, para que la tarea programada use los mismos. */
@@ -391,30 +412,22 @@ function checkAge(lastCheckAt: string | undefined, everyMinutes: number | null, 
     return { age_minutes: age, stale: everyMinutes === null ? null : age > everyMinutes * 2 + 5 };
 }
 
-async function authWeb(action: string | undefined, app: App, source: WebSessionSource, metadata: MetadataStore, profile: Profile, o: AuthWebOptions): Promise<number> {
+async function authWeb(action: string | undefined, app: App, conn: LocalConnection, metadata: MetadataStore, profile: Profile, o: AuthWebOptions): Promise<number> {
     if (!app.web) throw new CampusError("CONFIG_INVALID", "Sesión web no disponible.");
     const web = app.web;
+    const source = conn.source();
     const { verify, local } = o;
-    if (action === "import") {
-        const raw = process.stdin.isTTY
-            ? await promptHidden("Cookie MoodleSession del Campus (o la cabecera Cookie completa; no se muestra): ")
-            : await readStdin();
-        const cookies = parseCookieInput(raw);
-        const snapshot = await app.web.validateImport(cookies, new Date());
-        await source.save(snapshot);
-        out(`Sesión web validada y guardada en el almacén seguro: userid ${snapshot.user_id}, ${snapshot.cookies.length} cookie(s) de Moodle, revisión ${snapshot.revision}.`);
-        out("Dura lo que dure esa sesión en el Campus: vence por inactividad o si cerrás sesión en ese navegador. Para mantenerla viva: campus auth web keepalive.");
-        const state = readWebState(metadata);
-        if (state.published_revision && state.published_revision !== snapshot.revision) out("El remoto tiene su propia conexión web (ADR-141): se renueva desde su panel /admin/conexion, no desde esta PC.");
-        return 0;
-    }
+    if (action === "import") return webImport(app, conn, profile, { ...o, readHidden: () => (process.stdin.isTTY ? promptHidden("Cookie MoodleSession del Campus (o la cabecera Cookie completa; no se muestra): ") : readStdin()), waitEnter: async () => { if (process.stdin.isTTY) await promptVisible("Cuando lo hayas copiado, apretá Enter (no lo pegues acá): "); } });
+    if (action === "panel") return webPanel(conn, profile, o);
     if (action === "status") {
         const snap = await source.load();
         const state = readWebState(metadata);
         const remote = { published_revision: state.published_revision ?? null, published_at: state.published_at ?? null };
+        // ADR-142: el estado por capas de la conexión de esta PC (método, confianza, vencimiento estimado y acción).
+        const connection = await (await conn.service()).publicStatus();
         const base = snap
-            ? { present: true, user_id: snap.user_id, revision: snap.revision, imported_at: snap.imported_at, cookie_names: snap.cookies.map((c) => c.name), remote: { ...remote, in_sync: remoteInSync(state, snap.revision) }, last_check: state.last_check ?? null }
-            : { present: false, remote, last_check: state.last_check ?? null };
+            ? { present: true, user_id: snap.user_id, revision: snap.revision, imported_at: snap.imported_at, cookie_names: snap.cookies.map((c) => c.name), connection, last_check: state.last_check ?? null }
+            : { present: false, connection, last_check: state.last_check ?? null };
         if (snap && verify) {
             // Verificar también renueva la sesión (cualquier petición autenticada lo hace).
             try {
@@ -426,7 +439,6 @@ async function authWeb(action: string | undefined, app: App, source: WebSessionS
                         {
                             ...rest,
                             revision: c.revision,
-                            remote: { ...remote, in_sync: remoteInSync(state, c.revision) },
                             verified: true,
                             renewed_at: c.checked_at,
                             inactivity_limit_seconds: c.inactivity_limit_seconds,
@@ -451,16 +463,45 @@ async function authWeb(action: string | undefined, app: App, source: WebSessionS
             err("Agregá --local: sólo se borra la copia local. No cierra la sesión en el navegador.");
             return 2;
         }
-        await source.invalidate();
+        await (await conn.service()).dropSession();
         out("Sesión web local borrada. La sesión del navegador sigue abierta hasta que cierres sesión en el Campus.");
         return 0;
     }
     if (action === "keepalive") return webKeepalive(web, metadata, profile, o);
     if (action === "autologin") {
-        return webAutologinCommand(o.action, { web, source, secrets: new KeyringSecretStore(), metadata, profileId: profile.profile_id, siteUrl: profile.site_url, logger: { log: () => {} } });
+        return webAutologinCommand(o.action, { web, local: conn, secrets: new KeyringSecretStore(), metadata, profileId: profile.profile_id, siteUrl: profile.site_url });
     }
-    err("Uso: campus auth web import|status|logout|keepalive|autologin --profile <id> [--verify] [--local] [--quiet]");
+    err("Uso: campus auth web panel|import|status|logout|keepalive|autologin --profile <id> [--verify] [--local] [--quiet] [--clipboard] [--open] [--no-open]");
     return 2;
+}
+
+/** Texto fijo de renovación de la sesión web local (el error tipado trae además el comando exacto). */
+function webRenewHint(profileId: string): string {
+    return `Activá el login web automático (recomendado): ${cliCommand()} auth web autologin enable --profile ${profileId}. Respaldo: ${cliCommand()} auth web import --profile ${profileId} --clipboard.`;
+}
+
+/** Conexión web de esta PC (ADR-142). La identidad esperada sale de la metadata verificada o del token. */
+function localConnection(profile: Profile, metadata: MetadataStore, logger: ReturnType<typeof createLogger>, o: { requireSecondKey: boolean; askCode: ReturnType<typeof windowsCodePrompt> | null }, session: () => SessionManager): LocalConnection {
+    return new LocalConnection({
+        profile,
+        secrets: new KeyringSecretStore(),
+        metadata,
+        logger,
+        cli: cliCommand(),
+        requireSecondKey: o.requireSecondKey,
+        askCode: o.askCode,
+        expectedUserId: async () => metadata.read()?.identity.user_id ?? (await session().verified()).info.userid,
+        verifyApi: async () => ({ userid: (await session().verify()).info.userid }),
+    });
+}
+
+/** Servidores locales: estado por capas y login automático. Si la conexión no se puede armar, el servidor arranca igual. */
+async function wireLocal(local: LocalConnection, web: NonNullable<App["web"]>, deps: App["serverDeps"], logger: ReturnType<typeof createLogger>) {
+    try {
+        await local.wire(web, deps);
+    } catch (e) {
+        logger.log("warn", "web_connection_unavailable", { code: toPublicError(e).code });
+    }
 }
 
 /** Una lectura de identidad que renueva la sesión, más la medición del tiempo restante. */
@@ -634,7 +675,10 @@ async function writeMain(cmd: string, sub: string | undefined, arg: string | und
     const secrets = new KeyringSecretStore();
     const rp = wp.read_profile;
     const readMetadata = new FileMetadataStore(stateDir, rp.profile_id);
-    const webSource = new KeyringWebSessionSource(secrets, webSecretAccount(rp.profile_id, rp.site_url));
+    let appRef: WriteApp | null = null;
+    const serving = cmd === "serve-write" || cmd === "serve-full";
+    const local = localConnection(rp, readMetadata, logger, { requireSecondKey: serving, askCode: serving ? windowsCodePrompt() : null }, () => appRef!.read.session);
+    const webSource = local.source();
     const app = createWriteApp({
         profile: wp,
         secrets,
@@ -642,14 +686,16 @@ async function writeMain(cmd: string, sub: string | undefined, arg: string | und
         logger,
         location: writeStateLocation(stateDir, wp.profile_id),
         webSource,
-        webRenewHint: `Importá una sesión web nueva: ${cliCommand()} auth web import --profile ${rp.profile_id}`,
+        webRenewHint: webRenewHint(rp.profile_id),
+        webAuthError: (r) => local.authError(r),
         downloadDir: defaultDownloadDir(),
         renderer: findRenderer(),
     });
-    if (cmd === "serve-write" || cmd === "serve-full") {
+    appRef = app;
+    if (serving) {
         assertWriteServerMayStart(wp);
         // Mismo login automático que el servidor de lectura: sesión, contraseña y estado del perfil de lectura.
-        if (app.read.web) await wireAutoLogin({ web: app.read.web, source: webSource, secrets, metadata: readMetadata, profileId: rp.profile_id, siteUrl: rp.site_url, logger, serverDeps: app.read.serverDeps });
+        if (app.read.web) await wireLocal(local, app.read.web, app.read.serverDeps, logger);
         const server = cmd === "serve-full" ? app.fullServer() : app.server();
         await server.connect(new StdioServerTransport());
         logger.log("info", "write_server_started", { profile_id: wp.profile_id, read_profile: rp.profile_id, intents: [...app.intents.keys()] });

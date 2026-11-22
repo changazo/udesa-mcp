@@ -97,7 +97,7 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [085](#adr-085--reordenar-agrupamientos-y-aprobaciones) | Reordenar, agrupamientos y aprobaciones | adoptada |
 | [086](#adr-086--correcciones-de-la-revisión-de-lecturas-docentes) | Correcciones de la revisión de lecturas docentes | adoptada |
 | [087](#adr-087--el-keepalive-programado-no-es-viable-en-una-pc-administrada) | El keepalive programado no es viable en una PC administrada | adoptada |
-| [088](#adr-088--login-web-automático-con-contraseña-guardada-opcional-no-recomendado) | Login web automático con contraseña guardada (opcional, no recomendado) | adoptada como excepción del dueño |
+| [088](#adr-088--login-web-automático-con-contraseña-guardada-opcional-no-recomendado) | Login web automático con contraseña guardada (opcional, no recomendado) | adoptada como excepción del dueño; recomendación reemplazada por ADR-142 |
 | [089](#adr-089--aprobar-entradas-de-glosario-editar-sesiones-y-eventos) | Aprobar entradas de glosario, editar sesiones y eventos | adoptada |
 | [090](#adr-090--respuestas-por-pregunta-de-h5p) | Respuestas por pregunta de H5P | adoptada |
 | [091](#adr-091--páginas-y-secciones-de-cuestionarios) | Páginas y secciones de cuestionarios | adoptada |
@@ -136,7 +136,7 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [124](#adr-124--datos-personales-donde-la-operación-los-necesita) | Datos personales donde la operación los necesita | adoptada |
 | [125](#adr-125--escrituras-en-todos-los-cursos-con-rol-de-escritura) | Escrituras en todos los cursos con rol de escritura | adoptada; modificada por ADR-126 |
 | [126](#adr-126--sin-escalada-de-riesgo-por-curso-real) | Sin escalada de riesgo por curso real | adoptada |
-| [127](#adr-127--login-web-automático-en-el-servidor-remoto) | Login web automático en el servidor remoto | adoptada como excepción explícita del dueño |
+| [127](#adr-127--login-web-automático-en-el-servidor-remoto) | Login web automático en el servidor remoto | adoptada como excepción explícita del dueño; renovación y almacenamiento reemplazados por ADR-141 |
 | [128](#adr-128--recursos-incrustados-tipados-propuesta-no-adoptada) | Recursos incrustados tipados | propuesta |
 | [129](#adr-129--archivos-que-entrega-chatgpt-en-el-remoto) | Archivos que entrega ChatGPT en el remoto | adoptada |
 | [130](#adr-130--notificaciones-a-participantes-habilitadas) | Notificaciones a participantes habilitadas | adoptada |
@@ -150,6 +150,8 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [138](#adr-138--componentes-visuales-con-esquema-cerrado) | Componentes visuales con esquema cerrado | adoptada |
 | [139](#adr-139--revisión-de-accesibilidad-y-formato-del-contenido) | Revisión de accesibilidad y formato del contenido | adoptada |
 | [140](#adr-140--vista-previa-de-cambios-de-texto-enriquecido) | Vista previa de cambios de texto enriquecido | adoptada |
+| [141](#adr-141--renovación-de-la-conexión-web-del-remoto-desde-un-panel-privado) | Renovación de la conexión web del remoto desde un panel privado | adoptada |
+| [142](#adr-142--conexión-web-del-mcp-local-con-el-modelo-del-remoto) | Conexión web del MCP local con el modelo del remoto | adoptada |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -1594,7 +1596,7 @@ Los hallazgos del keepalive de la misma revisión están en ADR-106.
 
 ## ADR-088 · Login web automático con contraseña guardada (opcional, no recomendado)
 
-**Fecha:** 2026-10-20 · **Estatus:** adoptada como excepción explícita del dueño · **Origen:** la sesión web vence a las 4 h sin uso y el keepalive no es viable en una PC administrada (ADR-087). El dueño quiere que el MCP «empiece a andar apenas le llega la consulta», sin pasos previos en la terminal.
+**Fecha:** 2026-10-20 · **Estatus:** adoptada como excepción explícita del dueño; su carácter «no recomendado» lo reemplaza ADR-142 (método recomendado en la PC, decisión del dueño) · **Origen:** la sesión web vence a las 4 h sin uso y el keepalive no es viable en una PC administrada (ADR-087). El dueño quiere que el MCP «empiece a andar apenas le llega la consulta», sin pasos previos en la terminal.
 **Alcance:** se aparta de la directiva, que admite mantener una sesión importada pero no el autologin. Por eso es **opcional, apagado por defecto y no recomendado**: sólo para cuando el keepalive está bloqueado por motivos externos. `tool_mobile_get_autologin_key` sigue prohibido. Aplica al **MCP local** (`serve` y `serve-full`, que comparten la sesión del perfil de lectura). El remoto: ADR-127.
 **Auditoría (Moodle 5.1.8, `MOODLE_501_STABLE`):**
 - **Formulario de login** (`login/index.php`): el `logintoken` es de un solo uso y está atado a la sesión anónima. Se hace un POST con `username`, `password` y `logintoken`. Si sale bien, redirige a `?testsession=<userid>`; si falla, vuelve al formulario con `#loginerrormessage`.
@@ -2762,3 +2764,66 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
   - acción hacia el panel con la confianza vencida.
 - `remote-autologin-cli.test.ts` (17): recuperación por CLI.
 - Ajustes en `remote.test.ts`, `remote-web-autologin.test.ts` y `web-autologin.test.ts`.
+
+## ADR-142 · Conexión web del MCP local con el modelo del remoto
+
+**Fecha:** 2026-11-22 · **Estatus:** adoptada · **Origen:** pedido del dueño de mejorar la experiencia de mantener la sesión web en la PC (copiar a mano la cookie `MoodleSession`, que vence a las 4 h sin uso). Directiva `directiva-conexion-web-local.md`, aprobada por el dueño el 2026-11-22.
+
+**Decisiones del dueño (§3 de la directiva):**
+- D1 = panel local **y** terminal para renovar la confianza.
+- D2 = diálogo de Windows para el código cuando un servidor encuentra la confianza vencida; sin diálogo, error con la acción tipada. El servidor no abre el navegador solo.
+- D3 = `auth web import --clipboard`.
+- D4 = el login web automático pasa a ser el **método recomendado** en la PC y la cookie queda como respaldo. Reemplaza el carácter «no recomendado» de ADR-088. Es decisión del dueño, no una propuesta técnica.
+- D5 = registro v2 local con CAS.
+
+**Decisión técnica:**
+- **Un solo servicio de conexión** (`ConnectionService`) para el remoto y la PC, con `mode: "local"`. Mismos estados de renovación, cercos, guardas (6 intentos por día, pausas de 2 y 10 minutos), recibos, diagnóstico y estado por capas. Lo que cambia por modo se inyecta: acciones de recuperación, migración, duración del candado, canal para el código y datos extra del estado.
+- **Almacén local** (`FileKv`): el mismo subconjunto de Redis que usa el registro (GET, SET NX/EX, DEL, EXISTS, comparar-y-escribir, comparar-y-borrar) sobre `web-connection.json`, con candado de archivo entre procesos y escritura atómica (temporal + renombrado). Archivo dañado ≠ vacío: se informa como `kv_unavailable` y no se pisa.
+- **Cifrado:** sesión y confianza con una clave propia (`<perfil>|<sitio>|web_connection_box` en el Administrador de credenciales), creada la primera vez. La contraseña sigue aparte, en el keyring; nunca entra al registro.
+- **Migración sin login:** la cookie del keyring, la confianza del keyring y el estado de `web-autologin.json` se adoptan en el primer uso; el archivo viejo queda como `.migrated`. Un intento en curso queda como `attempt_uncertain`.
+- **Acciones locales tipadas:** `renew_local_trust` (panel), `enable_local_autologin`, `import_web_cookie` (como alternativa) y `renew_api_token`, con `command` exacto (incluye el `--profile`) y `alternatives`. El AUTH_REQUIRED de la sesión web lleva `details.recovery` con esos valores y nunca se presenta como resultado vacío.
+- **Panel local** (`auth web panel`): el mismo panel que el remoto (`handlePanel` con un `PanelEnv` por lugar), servido sólo en 127.0.0.1, en un puerto aleatorio:
+  - la credencial es un secreto de 32 bytes en la ruta, más un vínculo con el navegador (cookie HttpOnly, SameSite=Strict, acotada a esa ruta);
+  - Host exacto (frena el DNS rebinding), Origin exacto, formularios firmados con una clave de la ejecución, de un solo uso y de hasta 4 KB, POST → 303 → GET;
+  - `Referrer-Policy: same-origin` (lección de ADR-141);
+  - nunca pide la contraseña; se cierra solo tras una renovación verificada, a los 15 minutos sin uso o con Ctrl+C.
+- **Estado local en `campus_get_status`:** el mismo `connection` con `mode: "local"`, `method` (`autologin`, `cookie` o `none`), último uso y vencimiento estimado por inactividad de la sesión, `time_remaining_s` con `verify_web` (`core_session_time_remaining`, sólo lectura) y `device_trust: not_applicable` sin login automático. El diagnóstico no exige confianza en ese caso.
+- **Cookie como respaldo:** `--clipboard` lee el portapapeles con PowerShell sin mostrar el valor y lo vacía también si la validación falla; advierte que el historial de Windows (Win+V) no se borra. `--open` abre el Campus en el navegador (no lee nada de él). La importación publica sólo la sesión, con generación nueva, y conserva la confianza.
+
+**Ajustes justificados respecto de la directiva:**
+- **El transporte web relee la sesión publicada antes de iniciar otro login.** Si otro proceso publicó una sesión nueva mientras una operación usaba la vencida, se prueba esa primero. Sin esto, en una carrera real el segundo proceso hacía un login de más y chocaba con la pausa de 2 minutos.
+- **El último uso de la sesión se registra a lo sumo una vez por minuto, y sólo en local.** Sirve para estimar el vencimiento por inactividad. En el remoto sería una escritura al KV por operación.
+- **El candado del login automático dura 300 s en local** (90 s en el remoto), porque el diálogo para el código puede quedar abierto hasta 3 minutos.
+- **La cookie de vínculo del panel local no lleva `Secure`.** La página es http://127.0.0.1 y no sale de la PC; queda acotada a la ruta secreta.
+- **La plantilla HTML pasó a `src/remote/page.ts`**, compartida por el remoto y el panel local.
+- **Fila de ADR-141 en el índice:** faltaba y se agregó.
+
+**Límites:**
+- La segunda llave (`CAMPUS_WEB_AUTOLOGIN=true`) se mantiene en los servidores, y el login automático sólo se conecta al arrancar el servidor. Después de `enable`, hay que abrir una sesión nueva del cliente MCP.
+- Volver a una versión anterior exige renombrar `web-autologin.json.migrated` y repetir `enable`, porque un binario viejo no lee el registro v2.
+- Mientras quede abierto un servidor de la versión anterior, puede seguir escribiendo el estado viejo: después de actualizar, hay que reiniciar los clientes MCP.
+- El historial del portapapeles de Windows no se controla: se advierte y no se promete borrarlo.
+
+**Tests:**
+- `local-kv.test.ts` (6): dos procesos sobre el mismo archivo, vencimientos, archivo dañado, temporal huérfano, candado abandonado y 20 transiciones concurrentes de `ConnectionStore` sin pérdidas.
+- `local-connection.test.ts` (14):
+  - migración sana y con un intento en curso;
+  - AUTH_REQUIRED tipado sin sesión y con la cookie vencida;
+  - estado del método cookie;
+  - `verify_web` con el tiempo restante;
+  - `--clipboard`: vacía el portapapeles también si falla y nunca muestra el valor;
+  - puesta en marcha desde la terminal usada por un servidor;
+  - aviso de 7 días;
+  - dos procesos con la sesión vencida hacen un solo login;
+  - confianza vencida sin diálogo (lleva al panel, sin correo) y con diálogo (un código);
+  - seis intentos por día compartidos entre procesos;
+  - corte después de enviar el código (queda «incierto»).
+- `local-panel.test.ts` (7), con HTTP real:
+  - GET sin efectos, `same-origin` y sin campo de contraseña;
+  - Host ajeno y ruta sin secreto;
+  - Origin ausente, `null` o ajeno;
+  - renovación completa con cierre automático;
+  - formulario repetido;
+  - sin login automático;
+  - cierre por inactividad.
+- Ajuste en `web-autologin.test.ts`: las dos llaves sobre `LocalConnection.wire`. Las pruebas de ADR-141 siguen pasando sin cambios.

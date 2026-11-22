@@ -203,6 +203,8 @@ export class RemoteAutoLogin implements WebAutoLogin {
         private readonly inner: WebAutoLogin,
         private readonly renewHint: string,
         private readonly panelUrl: string | null = null,
+        /** Local (ADR-142): acción tipada de esta PC para el motivo, en lugar de la del panel remoto. */
+        private readonly toError: ((reason: ConnectionReason) => CampusError) | null = null,
     ) {}
     async login() {
         try {
@@ -211,6 +213,11 @@ export class RemoteAutoLogin implements WebAutoLogin {
             if (!(e instanceof CampusError)) throw e;
             // Los errores tipados del coordinador (ADR-141) ya traen su acción de recuperación: van tal cual.
             if (e.details && typeof e.details === "object" && "recovery" in e.details) throw e;
+            if (this.toError) {
+                const reason: ConnectionReason = e.details?.reason === MFA_CODE_REQUIRED ? "trust_expired" : /intentos|minutos|seguido/.test(e.message) ? "rate_limited" : e.code === "AUTH_REJECTED" || /desactivado/.test(e.message) ? "credentials_rejected" : /se frenó|cortó sin resultado/.test(e.message) ? "attempt_uncertain" : /confianza/.test(e.message) ? "trust_expired" : "session_expired";
+                const mapped = this.toError(reason);
+                throw new CampusError(e.code, e.message, { humanAction: mapped.humanAction, moodleErrorcode: e.moodleErrorcode, details: mapped.details });
+            }
             const message = e.message
                 .replace(/(campus )?auth web autologin enable/g, "el panel de conexión del servidor")
                 .replace(/(campus )?auth web autologin status/g, "campus_get_status");

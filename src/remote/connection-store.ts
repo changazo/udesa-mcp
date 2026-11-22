@@ -4,7 +4,7 @@ import { CAD_SCRIPT, CAS_SCRIPT, type KvClient } from "../write/store.js";
 import type { ConnectionReason, DiagnosticReport, RenewalState } from "./connection-contracts.js";
 
 /**
- * Registro autoritativo v2 de la conexión web remota (ADR-141): UNA clave por conexión (sitio, cuenta
+ * Registro autoritativo v2 de la conexión web (ADR-141; en local, ADR-142, sobre un archivo con candado): UNA clave por conexión (sitio, cuenta
  * Moodle esperada y familia del perfil de lectura), actualizada por compare-and-set con un script de Redis.
  * Sesión activa, confianza, generación y recibo de publicación cambian juntos. Las continuaciones del MFA y
  * las candidatas validadas van en claves aparte con vencimiento corto; el registro no tiene TTL (perderlo
@@ -18,6 +18,8 @@ export interface ActiveConnection {
     trust_expires_at: string | null;
     published_at: string;
     renewal_id: string;
+    /** Local (ADR-142): último uso exitoso de la sesión web, para estimar su vencimiento por inactividad. */
+    last_used_at?: string | null;
 }
 
 export interface PendingTransition {
@@ -45,7 +47,7 @@ export interface ConnectionRecord {
     control: {
         /** Intentos de login (ISO) de las últimas 24 h, panel y autologin juntos. */
         attempts: string[];
-        last: { at: string; ok: boolean; source: "panel" | "autologin" | "recovery"; code?: string } | null;
+        last: { at: string; ok: boolean; source: "panel" | "autologin" | "recovery" | "terminal" | "import"; code?: string } | null;
         disabled: { at: string; reason: ConnectionReason } | null;
         needs_trust: { at: string; reason: ConnectionReason } | null;
         pending: PendingTransition | null;

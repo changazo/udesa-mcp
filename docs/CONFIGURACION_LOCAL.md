@@ -65,7 +65,7 @@ Dos entradas posibles, con las mismas credenciales del keyring:
 
 Los perfiles sirven con cualquier rol: un estudiante lee lo suyo en todos sus cursos, y quien es docente o gestor en un curso además ve los datos de otras personas y puede escribir ahí. Si no vas a escribir, alcanza con `udesa-campus`.
 
-Con las dos conectadas, las tools de lectura aparecen duplicadas. Para un cliente que escribe alcanza con `udesa-campus-completo` ([PROCESOS.md](PROCESOS.md#perfiles-docente-lectura-y-docente-completo-adr-062)). En las dos, `CAMPUS_WEB_AUTOLOGIN=true` es la segunda llave del [login web automático](PROCESOS.md#login-web-automático-opcional-no-recomendado) (opcional).
+Con las dos conectadas, las tools de lectura aparecen duplicadas. Para un cliente que escribe alcanza con `udesa-campus-completo` ([PROCESOS.md](PROCESOS.md#perfiles-docente-lectura-y-docente-completo-adr-062)). En las dos, `CAMPUS_WEB_AUTOLOGIN=true` es la segunda llave del [login web automático](PROCESOS.md#login-web-automático-en-la-pc-recomendado) (opcional).
 
 **Con `--scope user`** (recomendado: no depende de la ruta del proyecto). Usá la ruta **absoluta** de `node.exe`: la app de escritorio de Claude puede no tener el `PATH` de tu terminal. Con el instalador oficial es `C:/Program Files/nodejs/node.exe`; con scoop, `C:/Users/<usuario>/scoop/apps/nodejs/current/node.exe` (`current` sigue las actualizaciones).
 
@@ -119,24 +119,33 @@ Con `serve` (perfil `docente-lectura`) todas las herramientas son de lectura, as
 
 ## Sesión web (para lo que no está en el servicio móvil)
 
-Algunas lecturas (estructura de cuestionarios, preguntas, reportes, historial de asistencia, preguntas de encuestas) y varias escrituras de `docente-completo` que van por formularios del Campus (crear tareas, H5P, LTI del laboratorio, entre otras; ver [HERRAMIENTAS.md](HERRAMIENTAS.md)) usan la web del Campus y no el token móvil. Para eso hace falta una **sesión web**: la cookie `MoodleSession` de tu navegador. El resto de las herramientas no la necesita.
+Algunas lecturas (estructura de cuestionarios, preguntas, reportes, historial de asistencia, preguntas de encuestas) y varias escrituras de `docente-completo` que van por formularios del Campus (crear tareas, H5P, LTI del laboratorio, entre otras; ver [HERRAMIENTAS.md](HERRAMIENTAS.md)) usan la web del Campus y no el token móvil. Para eso hace falta una **sesión web**. El resto de las herramientas no la necesita.
 
-1. Abrí el Campus en tu navegador con tu cuenta. Si querés que la sesión no dependa de tu navegación diaria, usá una ventana o un perfil aparte y no cierres sesión ahí.
-2. Herramientas de desarrollador (F12) → **Application** (Aplicación) → **Cookies** → `https://campusvirtual.udesa.edu.ar` → copiá el **Value** de `MoodleSession`.
-3. Importala desde tu terminal. La entrada no se muestra y también se puede pasar por stdin:
+**Método recomendado: login web automático** (ADR-142). El MCP local inicia sesión en la web solo, con la contraseña guardada en el Administrador de credenciales, y sólo pide el código del correo una vez por mes:
 
 ```bash
-node build/cli.js auth web import --profile udesa-docente
+node build/cli.js auth web autologin enable --profile udesa-docente
 ```
 
-La CLI valida la cookie antes de guardarla: comprueba que el Campus la acepte y que autentique a tu misma cuenta (el userid del login). Sólo guarda cookies de sesión de Moodle (`MoodleSession*`, `MOODLEID*`) y las guarda en el keyring. No hay respaldo en archivo: sin keyring, falla con `SECRET_STORE_UNAVAILABLE`.
+Después agregá `CAMPUS_WEB_AUTOLOGIN=true` a la entrada del cliente MCP (segunda llave) y abrí una sesión nueva. La confianza del dispositivo se renueva con el panel de esta PC (`auth web panel`). Paso a paso: [PROCESOS.md](PROCESOS.md#login-web-automático-en-la-pc-recomendado).
 
-- Estado: `node build/cli.js auth web status --profile udesa-docente --verify`.
+**Respaldo: importar la cookie `MoodleSession`** de tu navegador, para quien no quiere guardar la contraseña.
+
+1. Abrí el Campus en tu navegador con tu cuenta (o usá `--open`). Si querés que la sesión no dependa de tu navegación diaria, usá una ventana o un perfil aparte y no cierres sesión ahí.
+2. Herramientas de desarrollador (F12) → **Application** (Aplicación) → **Cookies** → `https://campusvirtual.udesa.edu.ar` → copiá el **Value** de `MoodleSession`.
+3. Importala desde tu terminal. Con `--clipboard` la toma del portapapeles y lo vacía después; sin `--clipboard`, la entrada no se muestra y también se puede pasar por stdin:
+
+```bash
+node build/cli.js auth web import --profile udesa-docente --clipboard
+```
+
+La CLI valida la cookie antes de guardarla: comprueba que el Campus la acepte y que autentique a tu misma cuenta (el userid del login). Sólo guarda cookies de sesión de Moodle (`MoodleSession*`, `MOODLEID*`), cifradas en el registro de la conexión de esta PC (la clave está en el Administrador de credenciales).
+
+- Estado: `node build/cli.js auth web status --profile udesa-docente --verify` (incluye el último uso y el vencimiento estimado por inactividad).
 - Borrar la copia local: `node build/cli.js auth web logout --profile udesa-docente --local` (no cierra la sesión del navegador).
-- **Duración:** la de esa sesión en el Campus. Vence tras 4 horas sin uso (medido en UdeSA; `auth web status --verify` lo informa) o si cerrás sesión en ese navegador. Cuando vence, las lecturas web devuelven `AUTH_REQUIRED` y hay que volver a importarla ([PROCESOS.md](PROCESOS.md#renovar-la-sesión-web)). Si el Campus rota la cookie durante el uso, la CLI guarda la versión rotada ya validada. Si usaste un perfil de Chrome aparte, cerrá la ventana sin «Cerrar sesión»: cerrar sesión invalida la cookie importada.
-- **Para no reimportarla:**
-  - **Keepalive:** a mano o con una tarea programada ([PROCESOS.md](PROCESOS.md#mantener-viva-la-sesión-web)).
-  - **Login web automático:** si el keepalive no es viable en esa computadora, el MCP local entra solo con la contraseña guardada. Es opcional y no recomendado ([PROCESOS.md](PROCESOS.md#login-web-automático-opcional-no-recomendado)). En ese caso la sesión del MCP es propia y no depende de tu navegador.
+- **Duración:** la de esa sesión en el Campus. Vence tras 4 horas sin uso (medido en UdeSA) o si cerrás sesión en ese navegador. Cuando vence, las lecturas web devuelven `AUTH_REQUIRED` con el comando para esta PC ([PROCESOS.md](PROCESOS.md#renovar-la-sesión-web)). Si el Campus rota la cookie durante el uso, el MCP guarda la versión rotada ya validada.
+- **Vaciar el portapapeles no borra el historial de Windows (Win+V)** ni su sincronización: si los usás, borrá esa entrada a mano.
+- Para no reimportarla sin activar el login automático: el keepalive ([PROCESOS.md](PROCESOS.md#mantener-viva-la-sesión-web)).
 - La cookie da acceso a tu cuenta como el navegador: no la pegues en chats, issues ni capturas.
 
 ## Descargas y páginas como imágenes

@@ -4,7 +4,8 @@ import { AutoLogin, AUTOLOGIN_MIN_INTERVAL_AFTER_OK_MS, AUTOLOGIN_MIN_INTERVAL_M
 import { parseDialogOutput } from "../../src/web/code-prompt.js";
 import { passwordLogin } from "../../src/web/login.js";
 import { MemoryWebSessionSource } from "../../src/web/session.js";
-import { wireAutoLogin } from "../../src/cli/web-autologin.js";
+import { LocalConnection } from "../../src/web/local-connection.js";
+import { MemoryKv } from "../../src/write/store.js";
 import { SITE, USER_ID } from "../fixtures/fake-moodle.js";
 import { FakeLogin, LOGIN_PASSWORD, LOGIN_USER } from "../fixtures/fake-login.js";
 import { makeHarness } from "../fixtures/harness.js";
@@ -298,15 +299,22 @@ describe("guardas de la Fase A (ADR-121)", () => {
 });
 
 describe("dos llaves y diálogo", () => {
-    it("wireAutoLogin: sólo con la variable Y la contraseña cargada", async () => {
+    it("servidores locales (ADR-142): el login automático sólo con la variable Y la contraseña cargada", async () => {
         const s = await setup();
-        const w = { web: s.web, source: s.source, secrets: s.h.secrets, metadata: s.h.metadata, profileId: PROFILE, siteUrl: SITE, logger: { log: () => {} } };
-        expect(await wireAutoLogin(w, {})).toBe(false);
-        expect(await wireAutoLogin(w, { CAMPUS_WEB_AUTOLOGIN: "true" })).toBe(false);
+        const kv = new MemoryKv();
+        const wire = async (env: Record<string, string>) => {
+            const local = new LocalConnection({ profile: s.h.profile, secrets: s.h.secrets, metadata: s.h.metadata, logger: { log: () => {} }, cli: "campus", requireSecondKey: true, env, kv, fetch: s.h.fake.fetch, expectedUserId: async () => USER_ID, verifyApi: async () => ({ userid: USER_ID }) });
+            const target: { connection?: unknown } = {};
+            const on = await local.wire(s.web, target);
+            expect(target.connection).toBeTruthy(); // el estado por capas está siempre, haya o no login automático
+            return on;
+        };
+        expect(await wire({})).toBe(false);
+        expect(await wire({ CAMPUS_WEB_AUTOLOGIN: "true" })).toBe(false);
         expect(s.web.autoLoginEnabled).toBe(false);
-        await saveLogin(s.h.secrets, PROFILE, SITE, { username: LOGIN_USER, password: LOGIN_PASSWORD });
-        expect(await wireAutoLogin(w, { CAMPUS_WEB_AUTOLOGIN: "1" })).toBe(false);
-        expect(await wireAutoLogin(w, { CAMPUS_WEB_AUTOLOGIN: "true" })).toBe(true);
+        await saveLogin(s.h.secrets, s.h.profile.profile_id, SITE, { username: LOGIN_USER, password: LOGIN_PASSWORD });
+        expect(await wire({ CAMPUS_WEB_AUTOLOGIN: "1" })).toBe(false);
+        expect(await wire({ CAMPUS_WEB_AUTOLOGIN: "true" })).toBe(true);
         expect(s.web.autoLoginEnabled).toBe(true);
     });
 

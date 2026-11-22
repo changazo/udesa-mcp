@@ -205,4 +205,4 @@ vercel link --yes --project <tu-proyecto> --scope <tu-equipo-de-vercel>
 - **MCP local por STDIO en esa máquina** (opcional, sin Vercel):
   1. Hacé el login local como arriba.
   2. Configurá el cliente según [CONFIGURACION_LOCAL.md](CONFIGURACION_LOCAL.md#4-claude-code), con las dos entradas, la ruta absoluta de Node y los comandos en Git Bash.
-  3. Para la sesión web, importala y mantenela viva con el keepalive o, si el keepalive no es viable en esa computadora, activá el [login web automático](PROCESOS.md#login-web-automático-opcional-no-recomendado).
+  3. Para la sesión web, activá el [login web automático](PROCESOS.md#login-web-automático-en-la-pc-recomendado) (método recomendado) o, como respaldo, importá la cookie.

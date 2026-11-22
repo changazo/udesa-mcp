@@ -3,16 +3,17 @@ import { CampusError, toPublicError } from "../errors.js";
 import { parseTrust, TRUST_MARGIN_MS, AUTOLOGIN_MAX_PER_DAY, AUTOLOGIN_MIN_INTERVAL_AFTER_OK_MS, AUTOLOGIN_MIN_INTERVAL_MS, type AutoLoginBackend, type AutoLoginState, type StoredLogin } from "../web/autologin.js";
 import { beginPasswordLogin, completePasswordLogin, OTP_REJECTED, PASSWORD_REJECTED, TRUST_COOKIE, type LoginResult, type MfaContinuation } from "../web/login.js";
 import { decodeSnapshot, encodeSnapshot, type WebCookie, type WebSessionSnapshot, type WebSessionSource } from "../web/session.js";
-import type { WebTransport } from "../web/transport.js";
+import type { WebOperation, WebTransport } from "../web/transport.js";
 import type { KvClient } from "../write/store.js";
-import { reasonMessage, recoveryAction, trustState, webAuthError, type ConnectionReason, type DiagnosticReport, type RecoveryAction, type RenewalState, type WebBootstrap } from "./connection-contracts.js";
+import { reasonMessage, recoveryAction, trustState, webAuthError, type ConnectionReason, type DiagnosticReport, type LocalWebMethod, type RecoveryAction, type RenewalState, type WebBootstrap } from "./connection-contracts.js";
 import { connectionKey, ConnectionStore, emptyRecord, RECEIPT_WINDOW_MS, type ActiveConnection, type ConnectionRecord, type PendingTransition } from "./connection-store.js";
 import type { KvSecretBox } from "./web-store.js";
 import { runDiagnostics } from "./connection-diagnostics.js";
 
 /**
- * Coordinador de la conexión web remota (ADR-141). Lo comparten el panel de renovación, el login
- * automático remoto, la fuente de sesión de los tres endpoints MCP y el diagnóstico:
+ * Coordinador de la conexión web (ADR-141 en el remoto; ADR-142 en el MCP local, sobre un archivo con
+ * candado). Lo comparten el panel de renovación, el login automático, la fuente de sesión de los
+ * servidores MCP y el diagnóstico:
  * - renovación explícita en dos pasos (pedir código → confirmar código) sobre una sesión candidata aislada;
  * - cada transición que manda contraseña o código se reserva antes por CAS: repetir el pedido HTTP no
  *   repite el envío a Moodle; un corte después de enviar queda «incierto», nunca se reintenta solo;
@@ -51,7 +52,31 @@ export interface ConnectionDeps {
     verifyApi: () => Promise<{ userid: number }>;
     now?: () => Date;
     log?: (event: string, fields: Record<string, unknown>) => void;
+    /** "local" (ADR-142): acciones con comandos de la CLI, migración desde el keyring y estado de la PC. */
+    mode?: "remote" | "local";
+    /** Acción de recuperación de cada motivo (por defecto, la del panel remoto). */
+    recovery?: (reason: ConnectionReason | "session_missing") => RecoveryAction;
+    /** AUTH_REQUIRED tipado de cada motivo (por defecto, el del panel remoto). */
+    authError?: (reason: ConnectionReason | "session_missing") => CampusError;
+    /** Local: estado anterior (keyring y web-autologin.json) que se adopta sin login ni MFA. */
+    legacyLoader?: () => Promise<{ snapshot: WebSessionSnapshot | null; trust: WebCookie[]; state: AutoLoginState }>;
+    /** Local: después de adoptar el estado anterior (p. ej. renombrar el archivo viejo). */
+    onMigrated?: () => void;
+    /** Duración del candado del login automático; con un diálogo para el código hace falta más (local). */
+    leaseSeconds?: number;
+    /** Hay un canal para el código (diálogo local): con la confianza vencida, el login se intenta igual. */
+    interactiveCode?: boolean;
+    /** Local: cómo se conecta esta PC (para la acción y el estado). */
+    localMethod?: () => LocalWebMethod;
+    /** Local: límite de inactividad medido de la sesión web (segundos), para estimar su vencimiento. */
+    inactivityLimitS?: () => number | null;
+    /** Local: datos extra del probe web (p. ej. el tiempo que le queda a la sesión). Sólo lecturas. */
+    probeExtras?: (op: WebOperation) => Promise<Record<string, unknown>>;
 }
+
+/** Sin medición, el límite de inactividad documentado del Campus (4 h). */
+export const DEFAULT_INACTIVITY_S = 4 * 3_600;
+const TOUCH_MIN_MS = 60_000;
 
 export interface RenewalOutcome {
     state: RenewalState;
@@ -86,8 +111,24 @@ export class ConnectionService {
         return this.cfg;
     }
 
+    get mode(): "remote" | "local" {
+        return this.d.mode ?? "remote";
+    }
+
     private log(event: string, fields: Record<string, unknown>) {
-        this.d.log?.(event, { mode: "remoto", ...fields });
+        this.d.log?.(event, { mode: this.mode === "local" ? "local" : "remoto", ...fields });
+    }
+
+    /** Acción de recuperación de un motivo, según el modo. */
+    action(reason: ConnectionReason | "session_missing"): RecoveryAction {
+        if (this.d.recovery) return this.d.recovery(reason);
+        return recoveryAction(reason === "session_missing" ? "session_expired" : reason, this.d.panelUrl);
+    }
+
+    /** AUTH_REQUIRED tipado de un motivo, según el modo. */
+    authError(reason: ConnectionReason | "session_missing"): CampusError {
+        if (this.d.authError) return this.d.authError(reason);
+        return webAuthError(reason === "session_missing" ? "session_expired" : reason, this.d.panelUrl);
     }
 
     // ---------- sellado ----------
@@ -119,8 +160,16 @@ export class ConnectionService {
         let rec = await this.store.read();
         if (!rec) {
             const fresh = await this.migrate();
-            rec = (await this.store.update((r) => (r ? null : fresh))).after!;
+            const res = await this.store.update((r) => (r ? null : fresh));
+            rec = res.after!;
             this.log("connection_migrated", { from: fresh.active ? "legacy" : "vacio", generation: rec.auth_generation });
+            if (res.changed && this.d.onMigrated) {
+                try {
+                    this.d.onMigrated();
+                } catch {
+                    /* el estado viejo queda donde estaba: no cambia el registro adoptado */
+                }
+            }
         }
         // Corte explícito publicado por la CLI (epoch mayor, modo disabled): se aplica sin login.
         if (this.cfg.mode === "disabled" && rec.config_epoch < this.cfg.epoch) {
@@ -144,6 +193,7 @@ export class ConnectionService {
 
     /** Estado legacy (claves web:<perfil>:*) adoptado como epoch 0, sin login ni MFA. Dañado ≠ vacío. */
     private async migrate(): Promise<ConnectionRecord> {
+        if (this.d.legacyLoader) return this.migrateLocal(this.d.legacyLoader);
         const at = this.now().toISOString();
         const legacyPrefix = `web:${this.d.profileId}`;
         const get = async (k: string) => {
@@ -200,6 +250,34 @@ export class ConnectionService {
         return rec;
     }
 
+    /**
+     * Local (ADR-142): adopta la sesión del keyring, la confianza del keyring y el estado de
+     * web-autologin.json, sin login ni MFA. Un estado con un intento en curso queda para revisar.
+     */
+    private async migrateLocal(load: NonNullable<ConnectionDeps["legacyLoader"]>): Promise<ConnectionRecord> {
+        const at = this.now().toISOString();
+        const { snapshot, trust, state: st } = await load();
+        const rec = emptyRecord(this.cfg.epoch, this.cfg.fingerprint);
+        rec.control.attempts = (st.attempts ?? []).filter((a) => this.now().getTime() - Date.parse(a) < 86_400_000);
+        rec.control.last = st.last ? { at: st.last.at, ok: st.last.ok, source: "autologin", ...(st.last.code ? { code: st.last.code } : {}) } : null;
+        if (st.disabled) rec.control.disabled = { at: st.disabled.at, reason: /contrase|password|rechaz/i.test(st.disabled.reason) ? "credentials_rejected" : "attempt_uncertain" };
+        if (st.needs_trust) rec.control.needs_trust = { at: st.needs_trust.at, reason: "trust_expired" };
+        if (st.inflight) rec.control.disabled = { at, reason: "attempt_uncertain" };
+        const own = trust.find((c) => c.name === `MFA_TOKEN_${this.d.expectedUserId}`);
+        if (snapshot || trust.length) {
+            rec.active = {
+                session_sealed: snapshot ? this.seal(encodeSnapshot(snapshot)) : null,
+                trust_sealed: trust.length ? this.seal(trust) : null,
+                session_revision: snapshot?.revision ?? null,
+                trust_expires_at: own?.expires ? new Date(own.expires * 1000).toISOString() : (st.trust_expires_at ?? null),
+                published_at: at,
+                renewal_id: "legacy",
+                last_used_at: snapshot ? snapshot.imported_at : null,
+            };
+        }
+        return rec;
+    }
+
     /** Qué impide escribir o iniciar sesión con la configuración de esta instancia (null = nada). */
     gate(rec: ConnectionRecord): ConnectionReason | null {
         if (rec.config_epoch > this.cfg.epoch) return "stale_instance";
@@ -243,6 +321,20 @@ export class ConnectionService {
                     return { ...rec, active: { ...rec.active, session_sealed: null, session_revision: null }, control: { ...rec.control, rejected_revisions: [...rec.control.rejected_revisions, ...(rev ? [rev] : [])].slice(-REJECTED_KEEP) } };
                 });
             },
+            // Local (ADR-142): último uso de la sesión, a lo sumo una escritura por minuto. El remoto no lo registra.
+            ...(svc.mode === "local"
+                ? {
+                      async touch(revision: string | null) {
+                          const now = svc.now();
+                          await svc.store.update((rec) => {
+                              if (!rec?.active?.session_sealed || (revision && rec.active.session_revision !== revision)) return null;
+                              const last = rec.active.last_used_at ? Date.parse(rec.active.last_used_at) : 0;
+                              if (now.getTime() - last < TOUCH_MIN_MS) return null;
+                              return { ...rec, active: { ...rec.active, last_used_at: now.toISOString() } };
+                          });
+                      },
+                  }
+                : {}),
         };
     }
 
@@ -250,20 +342,22 @@ export class ConnectionService {
 
     autoLoginBackend(): AutoLoginBackend {
         const svc = this;
-        const renewHint = svc.d.panelUrl ? `Renová la conexión en ${svc.d.panelUrl}` : "Renová la conexión desde el panel de conexión del servidor.";
+        const renewHint = svc.mode === "local" ? (svc.action("trust_expired").command ?? "Renová la confianza del dispositivo de esta PC.") : svc.d.panelUrl ? `Renová la conexión en ${svc.d.panelUrl}` : "Renová la conexión desde el panel de conexión del servidor.";
         return {
             renewHint,
             async preflight() {
                 const rec = await svc.record();
                 const g = svc.gate(rec);
-                if (g) throw webAuthError(g, svc.d.panelUrl);
-                if (svc.cfg.mode === "disabled") throw webAuthError("manual_disable", svc.d.panelUrl);
-                if (!svc.cfg.login) throw webAuthError("config_incomplete", svc.d.panelUrl);
-                if (svc.pendingActive(rec)) throw webAuthError("renewal_in_progress", svc.d.panelUrl);
-                if (rec.control.disabled) throw webAuthError(rec.control.disabled.reason, svc.d.panelUrl);
+                if (g) throw svc.authError(g);
+                if (svc.cfg.mode === "disabled") throw svc.authError("manual_disable");
+                if (!svc.cfg.login) throw svc.authError("config_incomplete");
+                if (svc.pendingActive(rec)) throw svc.authError("renewal_in_progress");
+                if (rec.control.disabled) throw svc.authError(rec.control.disabled.reason);
+                // Con un canal para el código (diálogo local, ADR-142), una confianza vencida no frena: el login la renueva.
+                if (svc.d.interactiveCode) return;
                 const exp = rec.active?.trust_expires_at ? Date.parse(rec.active.trust_expires_at) : null;
-                if (exp === null) throw webAuthError("trust_missing", svc.d.panelUrl);
-                if (exp - svc.now().getTime() < TRUST_MARGIN_MS) throw webAuthError("trust_expired", svc.d.panelUrl);
+                if (exp === null) throw svc.authError("trust_missing");
+                if (exp - svc.now().getTime() < TRUST_MARGIN_MS) throw svc.authError("trust_expired");
             },
             async loadLogin() {
                 return svc.cfg.login;
@@ -303,8 +397,8 @@ export class ConnectionService {
             async lock() {
                 const token = randomBytes(9).toString("base64url");
                 const deadline = Date.now() + LEASE_WAIT_MS;
-                while (!(await svc.store.lease(token, LEASE_S))) {
-                    if (Date.now() > deadline) throw webAuthError("renewal_in_progress", svc.d.panelUrl);
+                while (!(await svc.store.lease(token, svc.d.leaseSeconds ?? LEASE_S))) {
+                    if (Date.now() > deadline) throw svc.authError("renewal_in_progress");
                     await new Promise((res) => setTimeout(res, 500));
                 }
                 return async () => svc.store.releaseLease(token);
@@ -316,7 +410,7 @@ export class ConnectionService {
      * Publicación atómica de un login completo (renovación del panel o autologin): sesión, confianza,
      * generación nueva y recibo. Con `renewalId` de una renovación, sólo si sigue siendo la pendiente.
      */
-    private async commitLogin(r: LoginResult, renewalId: string, pendingId: string | null): Promise<ConnectionRecord | null> {
+    private async commitLogin(r: LoginResult, renewalId: string, pendingId: string | null, source: "panel" | "autologin" | "terminal" = pendingId ? "panel" : "autologin"): Promise<ConnectionRecord | null> {
         const at = this.now().toISOString();
         const own = r.remembered.find((c) => c.name === `MFA_TOKEN_${this.d.expectedUserId}`);
         const sessionSealed = this.seal(encodeSnapshot(r.snapshot));
@@ -334,9 +428,11 @@ export class ConnectionService {
                 trust_expires_at: own?.expires ? new Date(own.expires * 1000).toISOString() : (r.trust_expires_at ?? rec.active?.trust_expires_at ?? null),
                 published_at: at,
                 renewal_id: renewalId,
+                ...(this.mode === "local" ? { last_used_at: at } : {}),
             };
             const receipts = [...rec.receipts.filter((x) => this.now().getTime() - Date.parse(x.at) < RECEIPT_WINDOW_MS), { renewal_id: renewalId, auth_generation: generation, at, state: "committed" as const }];
-            const disabled = rec.control.disabled && RECOVERABLE.includes(rec.control.disabled.reason) && pendingId ? null : rec.control.disabled;
+            // Una puesta en marcha desde la terminal (contraseña escrita de nuevo) limpia cualquier freno anterior.
+            const disabled = source === "terminal" ? null : rec.control.disabled && RECOVERABLE.includes(rec.control.disabled.reason) && pendingId ? null : rec.control.disabled;
             return {
                 ...rec,
                 auth_generation: generation,
@@ -344,11 +440,88 @@ export class ConnectionService {
                 receipts,
                 // El diagnóstico anterior deja de ser vigente en la misma transición.
                 last_diagnostic: pendingReport(renewalId, rec.config_epoch, generation, r.snapshot.revision, at),
-                control: { ...rec.control, pending: pendingId ? null : rec.control.pending, needs_trust: null, disabled, inflight: null, last: { at, ok: true, source: pendingId ? "panel" : "autologin" } },
+                control: { ...rec.control, pending: pendingId ? null : rec.control.pending, needs_trust: null, disabled, inflight: null, last: { at, ok: true, source } },
             };
         });
         if (res.changed) this.log("connection_committed", { renewal_id: renewalId, generation: res.after!.auth_generation });
         return res.after;
+    }
+
+    // ---------- local: terminal, cookie y olvido (ADR-142) ----------
+
+    /** Confianza guardada, o [] si no se puede descifrar (una puesta en marcha nueva la reemplaza). */
+    async trustForLogin(): Promise<WebCookie[]> {
+        try {
+            return this.activeTrust(await this.record());
+        } catch {
+            return [];
+        }
+    }
+
+    /** Antes de pedir la contraseña en la terminal: mismas guardas de frecuencia que el panel, sin efectos. */
+    async terminalBlock(): Promise<RenewalOutcome | null> {
+        const rec = await this.record();
+        const p = this.pendingActive(rec);
+        if (p) return this.outcome(p.state, p.renewal_id, "renewal_in_progress", "Hay una renovación en curso (panel u otro proceso): esperá a que termine.");
+        const now = this.now().getTime();
+        const recent = rec.control.attempts.filter((a) => now - Date.parse(a) < 86_400_000);
+        if (recent.length >= AUTOLOGIN_MAX_PER_DAY) return this.outcome("failed", null, "rate_limited", reasonMessage("rate_limited"), { retry_at: new Date(Date.parse(recent.sort()[0]!) + 86_400_000).toISOString() });
+        const last = rec.control.last;
+        if (last) {
+            const pause = last.ok ? AUTOLOGIN_MIN_INTERVAL_AFTER_OK_MS : AUTOLOGIN_MIN_INTERVAL_MS;
+            if (now - Date.parse(last.at) < pause) return this.outcome("failed", null, "rate_limited", reasonMessage("rate_limited"), { retry_at: new Date(Date.parse(last.at) + pause).toISOString() });
+        }
+        return null;
+    }
+
+    /** Registra un intento de la terminal (cuenta para los seis por día) antes de enviar la contraseña. */
+    async noteTerminalAttempt(): Promise<void> {
+        await this.record(); // el registro existe (o se migra) antes de anotar
+        const now = this.now();
+        await this.store.update((r) => (r ? { ...r, control: { ...r.control, attempts: [...r.control.attempts.filter((a) => now.getTime() - Date.parse(a) < 86_400_000), now.toISOString()] } } : null));
+    }
+
+    /** Resultado fallido de la terminal (para la pausa de 10 minutos). */
+    async noteTerminalFailure(code: string): Promise<void> {
+        await this.record();
+        const at = this.now().toISOString();
+        await this.store.update((r) => (r ? { ...r, control: { ...r.control, last: { at, ok: false, source: "terminal", code } } } : null));
+    }
+
+    /** Login completo hecho en la terminal (`auth web autologin enable`): publica sesión y confianza con generación nueva. */
+    async adoptLogin(r: LoginResult): Promise<ConnectionRecord | null> {
+        if (r.snapshot.user_id !== this.d.expectedUserId) throw this.authError("identity_mismatch");
+        await this.record();
+        return this.commitLogin(r, `term-${randomBytes(6).toString("base64url")}`, null, "terminal");
+    }
+
+    /** Cookie importada y validada (`auth web import`): publica sólo la sesión, conserva la confianza. */
+    async importSession(snapshot: WebSessionSnapshot): Promise<ConnectionRecord | null> {
+        if (snapshot.user_id !== this.d.expectedUserId) throw this.authError("identity_mismatch");
+        await this.record();
+        const at = this.now().toISOString();
+        const id = `imp-${randomBytes(6).toString("base64url")}`;
+        const sealed = this.seal(encodeSnapshot(snapshot));
+        const res = await this.store.update((rec) => {
+            if (!rec) return null;
+            const generation = rec.auth_generation + 1;
+            const active: ActiveConnection = { session_sealed: sealed, trust_sealed: rec.active?.trust_sealed ?? null, session_revision: snapshot.revision, trust_expires_at: rec.active?.trust_expires_at ?? null, published_at: at, renewal_id: id, last_used_at: at };
+            return { ...rec, auth_generation: generation, active, receipts: [...rec.receipts.filter((x) => this.now().getTime() - Date.parse(x.at) < RECEIPT_WINDOW_MS), { renewal_id: id, auth_generation: generation, at, state: "committed" as const }], last_diagnostic: pendingReport(id, rec.config_epoch, generation, snapshot.revision, at) };
+        });
+        if (res.changed) this.log("connection_imported", { generation: res.after!.auth_generation });
+        return res.after;
+    }
+
+    /** `auth web autologin disable`: la confianza deja de existir; la sesión abierta queda hasta que vence. */
+    async forgetTrust(): Promise<void> {
+        await this.record();
+        await this.store.update((rec) => (rec ? { ...rec, active: rec.active ? { ...rec.active, trust_sealed: null, trust_expires_at: null } : null, control: { ...rec.control, disabled: null, needs_trust: null, inflight: null } } : null));
+    }
+
+    /** `auth web logout --local`: borra la sesión guardada (no cierra la del navegador). */
+    async dropSession(): Promise<void> {
+        await this.record();
+        await this.store.update((rec) => (rec?.active?.session_sealed ? { ...rec, active: { ...rec.active, session_sealed: null, session_revision: null } } : null));
     }
 
     // ---------- renovación desde el panel ----------
@@ -607,11 +780,13 @@ export class ConnectionService {
             verifyApi: this.d.verifyApi,
             saveRotation: (s, base) => this.sessionSource().save(s, base),
             nextAction: (rec) => this.reasonOf(rec),
+            trustRequired: this.mode === "remote" || this.cfg.mode === "enabled",
+            actionKind: (r) => this.action(r).kind,
         });
     }
 
     /** Sólo la sesión web publicada, aislada y sin login automático (campus_get_status con verify_web). */
-    async probeWeb(): Promise<{ state: "ok" | "failed" | "unknown"; checked_at: string; reason: string | null }> {
+    async probeWeb(): Promise<{ state: "ok" | "failed" | "unknown"; checked_at: string; reason: string | null; [k: string]: unknown }> {
         const at = () => this.now().toISOString();
         let snapshot: WebSessionSnapshot | null;
         try {
@@ -623,8 +798,9 @@ export class ConnectionService {
         try {
             const t = this.d.isolatedTransport(snapshot);
             const op = await t.open();
+            const extras = this.d.probeExtras ? await this.d.probeExtras(op).catch(() => ({})) : {};
             if (op.rotated && op.userId !== null) await this.sessionSource().save(t.snapshotOf(op, this.now()), snapshot.revision).catch(() => undefined);
-            return { state: "ok", checked_at: at(), reason: null };
+            return { state: "ok", checked_at: at(), reason: null, ...extras };
         } catch (e) {
             const code = toPublicError(e).code;
             return { state: code === "AUTH_REQUIRED" || code === "IDENTITY_MISMATCH" ? "failed" : "unknown", checked_at: at(), reason: code };
@@ -654,19 +830,33 @@ export class ConnectionService {
             rec = await this.record();
         } catch (e) {
             const reason = (e instanceof CampusError && typeof e.details?.reason === "string" ? e.details.reason : "kv_unavailable") as ConnectionReason;
-            return { schema_version: 1, mode: "remote", persistence: { state: "failed", checked_at: this.now().toISOString(), reason }, action: recoveryAction(reason, this.d.panelUrl) };
+            return { schema_version: 1, mode: this.mode, persistence: { state: "failed", checked_at: this.now().toISOString(), reason }, action: this.action(reason) };
         }
         const reason = this.reasonOf(rec);
         const d = rec.last_diagnostic;
         const current = d && d.auth_generation === rec.auth_generation && d.config_epoch === rec.config_epoch;
         const check = (k: keyof DiagnosticReport["checks"]) => (current ? { state: d!.checks[k].state, checked_at: d!.checks[k].checked_at } : { state: "not_checked", checked_at: null });
-        const action: RecoveryAction | null = reason ? recoveryAction(reason, this.d.panelUrl) : null;
+        const local = this.mode === "local";
+        const method = local ? (this.d.localMethod?.() ?? (this.cfg.mode === "enabled" ? "autologin" : rec.active?.session_sealed ? "cookie" : "none")) : null;
+        // Local sin sesión y sin login automático: no hay motivo del catálogo, pero sí algo que hacer.
+        const action: RecoveryAction | null = reason ? this.action(reason) : local && method !== "autologin" && !rec.active?.session_sealed ? this.action("session_missing") : null;
+        const webSession: Record<string, unknown> = { ...check("web_session"), present: !!rec.active?.session_sealed };
+        if (local && rec.active?.session_sealed) {
+            const lastUsed = rec.active.last_used_at ?? rec.active.published_at;
+            const limit = this.d.inactivityLimitS?.() ?? null;
+            webSession.last_used_at = lastUsed;
+            webSession.estimated_expires_if_idle_at = new Date(Date.parse(lastUsed) + (limit ?? DEFAULT_INACTIVITY_S) * 1000).toISOString();
+            webSession.estimate_basis = limit ? "limite_medido" : "limite_documentado_4h";
+            if (method === "autologin") webSession.note = "Con el login automático, una sesión vencida se renueva sola mientras la confianza del dispositivo esté vigente.";
+        }
+        const trustInfo = local && method !== "autologin" ? { state: "not_applicable", expires_at: rec.active?.trust_expires_at ?? null } : { state: trustState(rec.active?.trust_expires_at ?? null, this.now()), expires_at: rec.active?.trust_expires_at ?? null };
         return {
             schema_version: 1,
-            mode: "remote",
+            mode: this.mode,
+            ...(local ? { method } : {}),
             api_token: check("api_token"),
-            web_session: { ...check("web_session"), present: !!rec.active?.session_sealed },
-            device_trust: { state: trustState(rec.active?.trust_expires_at ?? null, this.now()), expires_at: rec.active?.trust_expires_at ?? null },
+            web_session: webSession,
+            device_trust: trustInfo,
             persistence: { state: "ok", checked_at: this.now().toISOString() },
             renewal: { state: rec.control.pending?.state ?? "idle", reason: rec.control.pending?.reason ?? null, last_result: rec.receipts.at(-1) ? { renewal_id: rec.receipts.at(-1)!.renewal_id, at: rec.receipts.at(-1)!.at } : null },
             activation: rec.config_epoch < this.cfg.epoch && this.cfg.mode === "enabled" ? { state: rec.activation?.state ?? "pending", expected_epoch: this.cfg.epoch, observed_epoch: rec.config_epoch } : null,

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { CampusError, toPublicError } from "../errors.js";
 import type { WebCookie, WebSessionSnapshot } from "../web/session.js";
 import type { WebTransport } from "../web/transport.js";
-import { recoveryAction, trustState, type Check, type ConnectionReason, type DiagnosticReport } from "./connection-contracts.js";
+import { recoveryAction, trustState, type Check, type ConnectionReason, type DiagnosticReport, type RecoveryKind } from "./connection-contracts.js";
 import type { ConnectionRecord, ConnectionStore } from "./connection-store.js";
 
 /**
@@ -25,6 +25,10 @@ export interface DiagnosticsContext {
     verifyApi: () => Promise<{ userid: number }>;
     saveRotation: (s: WebSessionSnapshot, baseRevision: string) => Promise<void>;
     nextAction: (rec: ConnectionRecord) => ConnectionReason | null;
+    /** Local sin login automático (cookie): la confianza del dispositivo no aplica (ADR-142). */
+    trustRequired?: boolean;
+    /** Tipo de acción de cada motivo (local o remoto). */
+    actionKind?: (reason: ConnectionReason) => RecoveryKind;
 }
 
 const check = (state: Check["state"], at: Date | null, reason: string | null = null): Check => ({ state, checked_at: at ? at.toISOString() : null, reason });
@@ -82,9 +86,12 @@ export async function runDiagnostics(c: DiagnosticsContext): Promise<DiagnosticR
     const own = trust.find((x) => x.name === `MFA_TOKEN_${c.expectedUserId}`);
     const expiresAt = own?.expires ? new Date(own.expires * 1000).toISOString() : null;
     const ts = trust.length && !own ? "missing" : trustState(expiresAt, c.now());
-    const deviceTrust = { ...check(ts === "valid" || ts === "expiring" ? "ok" : ts === "unknown" ? "unknown" : "failed", c.now(), ts), trust: ts, expires_at: expiresAt };
+    const trustRequired = c.trustRequired !== false;
+    const deviceTrust = trustRequired
+        ? { ...check(ts === "valid" || ts === "expiring" ? "ok" : ts === "unknown" ? "unknown" : "failed", c.now(), ts), trust: ts, expires_at: expiresAt }
+        : { ...check("not_applicable", c.now(), "sin_login_automatico"), trust: ts, expires_at: expiresAt };
 
-    const required = [persistence, api, web, identity, deviceTrust];
+    const required = trustRequired ? [persistence, api, web, identity, deviceTrust] : [persistence, api, web, identity];
     const result: DiagnosticReport["result"] = required.every((x) => x.state === "ok") ? "ready" : required.some((x) => x.state === "failed") ? (persistence.state === "ok" ? "partial" : "failed") : "partial";
     const report: DiagnosticReport = {
         diagnostic_id: id,
@@ -96,7 +103,7 @@ export async function runDiagnostics(c: DiagnosticsContext): Promise<DiagnosticR
         finished_at: c.now().toISOString(),
         result,
         checks: { persistence, api_token: api, web_session: web, identity, device_trust: deviceTrust },
-        next_action: rec ? (c.nextAction(rec) ? recoveryAction(c.nextAction(rec)!, null).kind : null) : null,
+        next_action: rec ? (c.nextAction(rec) ? (c.actionKind ? c.actionKind(c.nextAction(rec)!) : recoveryAction(c.nextAction(rec)!, null).kind) : null) : null,
     };
     // Un informe tardío no reemplaza el de una generación más nueva.
     if (rec) await c.store.update((r) => (r && r.auth_generation === report.auth_generation && r.config_epoch === report.config_epoch ? { ...r, last_diagnostic: report } : null)).catch(() => undefined);

@@ -9,12 +9,12 @@ En los comandos, `campus` equivale a `node build/cli.js` ejecutado en la raíz d
 | Credencial | Para qué | Dónde vive | Cómo se renueva | Si se expone |
 |---|---|---|---|---|
 | Token del servicio móvil de Moodle | Todas las herramientas REST (la mayoría) | Local: Administrador de credenciales de Windows. Remoto: `CAMPUS_MOODLE_TOKEN` en Vercel | [Renovar el token móvil](#renovar-el-token-móvil) | [Incidente: token móvil](#token-móvil-expuesto) |
-| Sesión web del Campus (cookie `MoodleSession`) | Estructura de cuestionarios, preguntas, reportes y overrides | Local: keyring. Remoto: registro cifrado de la conexión en el KV (ADR-141) | [Renovar la sesión web](#renovar-la-sesión-web) | [Incidente: cookie](#cookie-de-sesión-web-expuesta) |
+| Sesión web del Campus (cookie `MoodleSession`) | Estructura de cuestionarios, preguntas, reportes y overrides | Local: registro cifrado de la conexión en `web-connection.json`, en el directorio del perfil (ADR-142). Remoto: registro cifrado de la conexión en el KV (ADR-141) | [Renovar la sesión web](#renovar-la-sesión-web) | [Incidente: cookie](#cookie-de-sesión-web-expuesta) |
 | `OAUTH_SIGNING_SECRET` | Firma los accesos de ChatGPT, Codex y Claude Code al remoto | Sólo en Vercel | `campus remote init-secret --profile udesa-docente` + `vercel deploy --prod` (desconecta a todos los clientes) | Rotarla |
 | Secret de la OAuth App de GitHub | Login con GitHub del remoto | Sólo en Vercel | Generar uno nuevo en GitHub y cargarlo con `vercel env add GITHUB_CLIENT_SECRET production --sensitive` | Revocarlo en GitHub y cargar uno nuevo |
 | Clave de firma de planes de escritura (`write-signing\|<perfil>`) | Detecta planes de escritura alterados en disco ([Escrituras](#escrituras)) | Local: Administrador de credenciales de Windows. Se crea sola la primera vez | Borrarla del Administrador de credenciales: se crea otra y los planes pendientes dejan de valer | Borrarla y volver a planificar |
 | Clave de firma de planes remotos | Igual que la local, para `/mcp-completo` y `/mcp-escritura` | Derivada de `OAUTH_SIGNING_SECRET` (no se guarda aparte) | Rotar `OAUTH_SIGNING_SECRET` | Rotarla |
-| Contraseña del Campus y cookie de dispositivo de confianza (`MFA_TOKEN_<userid>`), **sólo si activaste el login web automático** | Que el MCP local inicie sesión en la web solo (opcional, no recomendado; ADR-088) | Local: Administrador de credenciales de Windows (`web_login`, `web_trust`) | `auth web autologin enable` | Cambiar la contraseña del Campus (cierra todas las sesiones) y `auth web autologin disable` |
+| Contraseña del Campus y cookie de dispositivo de confianza (`MFA_TOKEN_<userid>`), **sólo si activaste el login web automático** | Que el MCP local inicie sesión en la web solo (método recomendado en la PC; ADR-142; antes ADR-088) | Local: Administrador de credenciales de Windows (`web_login`, `web_trust`) | `auth web autologin enable` | Cambiar la contraseña del Campus (cierra todas las sesiones) y `auth web autologin disable` |
 | Contraseña del Campus y confianza del dispositivo **del remoto** | Login web automático del remoto (ADR-127, ADR-141) | Contraseña: `CAMPUS_WEB_BOOTSTRAP` (o, en instalaciones previas, `CAMPUS_WEB_LOGIN`) en Vercel, sensible. Confianza y sesión: registro cifrado en el KV | [Panel `/admin/conexion`](#renovar-la-conexión-lo-habitual-cada-28-días) | Cambiar la contraseña del Campus y `remote autologin disable --redeploy` |
 | `KV_REST_API_TOKEN` (Upstash) | Planes, interruptor, límites y auditoría de las escrituras remotas | Sólo en Vercel (integración del Marketplace) | Regenerarlo en Upstash y redesplegar | Regenerarlo; mientras tanto, quitar `CAMPUS_WRITE_ENABLED` |
 
@@ -26,7 +26,8 @@ Ninguna credencial está en el repositorio. Las variables de Vercel se listan co
 |---|---|---|
 | `AUTH_REQUIRED` en casi todas las herramientas | Venció o se revocó el token móvil | [Renovar el token móvil](#renovar-el-token-móvil) |
 | `AUTH_REQUIRED` sólo en estructura, preguntas, reportes u overrides, con «sesión web» en el mensaje | Venció la sesión web, o no está configurada | [Renovar la sesión web](#renovar-la-sesión-web) |
-| `AUTH_REQUIRED` en lecturas web con «login web automático» en el mensaje | El login automático está desactivado (rechazo del Campus), frenado por los límites o sin canal para el código | `auth web autologin status`; si está desactivado, [volver a cargarlo](#login-web-automático-opcional-no-recomendado) |
+| `AUTH_REQUIRED` en lecturas web con `details.recovery.command` (MCP local) | La sesión web de esta PC venció y no se pudo renovar sola. El comando dice qué hacer según el método de la PC: `renew_local_trust` (renovar la confianza con el panel local), `enable_local_autologin` (activar el login automático) o, como alternativa, `import_web_cookie` | Corré ese comando en tu terminal ([síntomas por capa en la PC](#síntomas-por-capa-en-la-pc)); nunca pegues contraseñas, códigos ni cookies en el chat |
+| `AUTH_REQUIRED` en lecturas web con «login web automático» en el mensaje | El login automático está desactivado (rechazo del Campus), frenado por los límites o sin canal para el código | `auth web autologin status`; si está desactivado, [volver a cargarlo](#login-web-automático-en-la-pc-recomendado) |
 | En el remoto, `AUTH_REQUIRED` con `details.recovery` (`renew_web_trust`) o `campus_get_status` → `connection.action` | Venció o está por vencer la confianza del dispositivo del remoto | Abrí el panel `/admin/conexion` del remoto y [renová la conexión](#renovar-la-conexión-lo-habitual-cada-28-días); el código va en el panel, nunca en el chat |
 | En el remoto, `connection.action.kind` = `cli_recovery` o `activate_recovery` | La configuración del remoto necesita la recuperación desde la PC, o hay una recuperación publicada sin activar | [Recuperación desde la PC](#recuperación-desde-la-pc-cli-adr-141) o «Activar y verificar recuperación» en el panel |
 | Se abre un diálogo «Campus Virtual — código de verificación» | Venció la confianza del dispositivo (cada ~28 días) y el login automático necesita el código del correo | Escribí ahí el código que llegó a tu correo; nunca en el chat |
@@ -83,17 +84,25 @@ Moodle suele devolver **el mismo** token si el anterior sigue vigente. En ese ca
 
 ## Renovar la sesión web
 
-> Si en esa PC está activo el [login web automático](#login-web-automático-opcional-no-recomendado), no hace falta este proceso: el MCP local entra solo. En el remoto, lo mismo con el [login web automático remoto](#login-web-automático-en-el-remoto).
+Cuándo: `AUTH_REQUIRED` sólo en las lecturas web. La sesión web vence tras **4 horas sin uso** (medido en UdeSA) o cuando cerrás sesión en el navegador de donde salió la cookie. El error del MCP local trae en `details.recovery.command` el comando exacto para esa PC.
 
-Cuándo: `AUTH_REQUIRED` sólo en las lecturas web. La sesión vence cuando pasan **4 horas sin uso** (medido en UdeSA), o cuando cerrás sesión en el navegador de donde salió la cookie. Para que no venza por inactividad, ver [Mantener viva la sesión web](#mantener-viva-la-sesión-web).
+Hay dos caminos (ADR-142, decisión del dueño):
 
-1. Abrí el Campus con tu cuenta. Conviene una ventana o un perfil de Chrome aparte, que no uses para navegar. Al terminar, cerrá la ventana **sin** «Cerrar sesión»: cerrar sesión invalida la cookie.
+1. **Login web automático (recomendado).** El MCP inicia sesión solo cuando la sesión vence; sólo hace falta renovar la confianza del dispositivo una vez por mes, con el código del correo. Puesta en marcha y renovación: [Login web automático en la PC](#login-web-automático-en-la-pc-recomendado).
+2. **Importar la cookie (respaldo).** Para quien no quiere guardar la contraseña. Hay que repetirlo cada vez que la sesión vence.
+
+### Importar la cookie (respaldo)
+
+1. Abrí el Campus con tu cuenta. Conviene una ventana o un perfil de Chrome aparte, que no uses para navegar. Al terminar, cerrá la ventana **sin** «Cerrar sesión»: cerrar sesión invalida la cookie. Con `--open`, la CLI abre el Campus por vos.
 2. F12 → Application → Cookies → `https://campusvirtual.udesa.edu.ar` → copiá el **Value** de `MoodleSession`.
-3. Importala. La entrada es oculta y la CLI comprueba que el Campus la acepte y que sea tu cuenta:
+3. Importala. Con `--clipboard`, la CLI la toma del portapapeles y después lo vacía (también si falla). Sin `--clipboard`, la entrada es oculta. En los dos casos comprueba que el Campus la acepte y que sea tu cuenta, y nunca muestra el valor:
 
    ```bash
-   node build/cli.js auth web import --profile udesa-docente
+   node build/cli.js auth web import --profile udesa-docente --clipboard
    ```
+
+- **Historial del portapapeles:** vaciar el portapapeles no borra el historial de Windows (Win+V) ni su sincronización en la nube. Si los tenés activos, borrá esa entrada a mano o usá la entrada oculta (sin `--clipboard`).
+- **Vencimiento estimado:** `auth web status` y `campus_get_status` muestran el último uso y a qué hora vence aproximadamente si nadie la usa. Es una estimación: el límite medido por `auth web status --verify` o, si no hay medición, las 4 h documentadas. `campus_get_status` con `verify_web` informa el tiempo real que queda (`time_remaining_s`).
 
 La sesión importada es sólo del MCP local. El remoto tiene su propia sesión y su propia confianza, que se renuevan desde su panel ([login web automático en el remoto](#login-web-automático-en-el-remoto)); `remote push-web-session` quedó retirado (ADR-141).
 
@@ -116,38 +125,121 @@ node build/cli.js auth web keepalive install --profile udesa-docente
 - Corre sólo con tu sesión de Windows iniciada y la PC encendida. Si la PC queda apagada o suspendida más de 4 horas, la sesión vence igual: [renovala](#renovar-la-sesión-web).
 - Si movés el proyecto o cambia la instalación de Node, `status` lo avisa: reinstalala. Si usás `--profile-file` o un directorio de estado propio (`--state-dir` o `CAMPUS_STATE_DIR`), instalala con los mismos: la tarea los repite (ADR-106).
 - Una sesión que no vence alarga la exposición si la cookie se filtra. El corte de emergencia es el mismo: [Cerrar sesión en el navegador de origen](#cookie-de-sesión-web-expuesta).
-- **En PCs administradas (cuenta de dominio, sin administrador, con antivirus corporativo) la tarea puede no funcionar:** `conhost --headless` puede terminar sin lanzar Node, y una variante con `wscript.exe` puede desaparecer por el antivirus (ADR-087). Si en tu PC no podés programar tareas, la alternativa es el [login web automático](#login-web-automático-opcional-no-recomendado).
+- **En PCs administradas (cuenta de dominio, sin administrador, con antivirus corporativo) la tarea puede no funcionar:** `conhost --headless` puede terminar sin lanzar Node, y una variante con `wscript.exe` puede desaparecer por el antivirus (ADR-087). Si en tu PC no podés programar tareas, la alternativa es el [login web automático](#login-web-automático-en-la-pc-recomendado).
 
-## Login web automático (opcional, no recomendado)
+Es el **método recomendado** para la sesión web en la PC (ADR-142, decisión del dueño; antes era opcional y no recomendado, ADR-088). Guarda tu contraseña del Campus en el Administrador de credenciales, y con ella el **MCP local** inicia sesión en la web solo cuando la sesión venció. Para el remoto (Vercel): [Login web automático en el remoto](#login-web-automático-en-el-remoto).
 
-Usalo **sólo si el keepalive no es viable** en esa PC (ADR-088). Guarda tu contraseña del Campus en el Administrador de credenciales, y con ella el **MCP local** inicia sesión en la web solo cuando la sesión venció. Para el remoto (Vercel): [Login web automático en el remoto](#login-web-automático-en-el-remoto).
+La sesión, la confianza del dispositivo, los intentos y las renovaciones viven en **un** registro de esta PC (`web-connection.json` en el directorio del perfil, cifrado con la clave `…|web_connection_box` del Administrador de credenciales). Lo comparten todos los procesos locales (`serve`, `serve-full`, la CLI y la tarea de keepalive): dos procesos con la sesión vencida hacen **un** solo login. Es el mismo modelo que el remoto (ADR-141).
 
-1. **Puesta en marcha**, una vez, en tu terminal. Pide usuario, contraseña y el código que el Campus te manda al correo. El MCP queda como **dispositivo de confianza** (en UdeSA, 28 días):
+1. **Puesta en marcha**, una vez, en tu terminal. Pide usuario, contraseña y el código que el Campus te manda al correo. La PC queda como **dispositivo de confianza** (en UdeSA, 28 días):
 
    ```bash
    node build/cli.js auth web autologin enable --profile udesa-docente
    ```
 
-2. **Segunda llave:** agregá `CAMPUS_WEB_AUTOLOGIN=true` a la entrada del cliente MCP (`udesa-campus` y, si la usás, `udesa-campus-completo`) y abrí una sesión nueva. Sin la variable, el servidor no lee la contraseña.
+2. **Segunda llave:** agregá `CAMPUS_WEB_AUTOLOGIN=true` a la entrada del cliente MCP (`udesa-campus` y, si la usás, `udesa-campus-completo`) y abrí una sesión nueva. Sin la variable, los servidores no usan la contraseña.
 3. **Uso:**
    - Cuando una herramienta necesita la sesión web y está vencida, el servidor inicia sesión solo y sigue.
    - Cuando vence la confianza del dispositivo, abre un **diálogo de Windows** para el código del correo. No lo escribas en el chat.
-   - Si el diálogo no abre, la herramienta devuelve `AUTH_REQUIRED`: repetí el paso 1.
+   - Si el diálogo no abre, la herramienta devuelve `AUTH_REQUIRED` con el comando del panel local: renová con el paso 4.
 
-**Estado, vencimiento de la confianza e intentos:** `auth web autologin status --profile udesa-docente`.
+4. **Renovar la confianza (cada ~28 días, o antes):** el panel de conexión de esta PC.
+
+   ```bash
+   node build/cli.js auth web panel --profile udesa-docente
+   ```
+
+   - Abre tu navegador en `http://127.0.0.1:<puerto>/<secreto>/conexion`. Sólo responde en esta PC; el secreto de la dirección es la llave mientras está abierto: no lo compartas.
+   - Los pasos son los del remoto: «Enviar código y renovar», escribir el código del correo en el panel y «Confirmar y verificar». Termina con una comprobación automática.
+   - El panel **nunca pide la contraseña**: si no hay login automático, muestra el comando de la terminal.
+   - Se cierra solo después de una renovación verificada, a los 15 minutos sin uso o con Ctrl+C. Con `--no-open` sólo muestra el enlace.
+   - También se puede renovar desde la terminal, repitiendo el paso 1.
+
+**Estado, vencimiento de la confianza e intentos:** `auth web autologin status --profile udesa-docente`, o `campus_get_status` (`connection`, con `mode: "local"`). El aviso llega 7 días antes del vencimiento.
+
+### Síntomas por capa en la PC
+
+| `campus_get_status` → `connection` | Qué pasa | Qué hacer |
+|---|---|---|
+| `method: "none"`, `action.kind: enable_local_autologin` | La PC no tiene sesión web ni login automático | `auth web autologin enable` (recomendado) o, como respaldo, `auth web import --clipboard` |
+| `method: "cookie"`, `web_session.estimated_expires_if_idle_at` cerca | Cookie importada a punto de vencer por inactividad | Usarla o activar el login automático para no reimportarla |
+| `device_trust.state: expiring` o `expired`, `action.kind: renew_local_trust` | La confianza del dispositivo vence o venció | `auth web panel` (o el diálogo, si lo ofrece el servidor) |
+| `renewal.state: uncertain`, `action.kind: review_attempt` | Un intento quedó sin resultado confirmado | Revisá Sesiones del navegador en el Campus; el panel ofrece «Iniciar otra renovación». Nunca se reenvía solo |
+| `persistence.state: failed` (`kv_unavailable`) | El archivo de la conexión está dañado o tomado | No se pisa solo. Revisá `web-connection.json`; para empezar de cero, movelo de lugar y repetí `auth web autologin enable` |
+| `persistence.state: failed` (`config_conflict`) | Se perdió la clave de cifrado del Administrador de credenciales | Repetí `auth web autologin enable` |
 
 **Guardas:**
 - Si el Campus rechaza la contraseña o el código, el login automático se **desactiva**. Nunca reintenta, porque cada fallo suma al bloqueo de la cuenta.
-- Pausa de 10 minutos después de un intento fallido y de 2 minutos después de uno exitoso; a lo sumo 6 intentos en 24 horas.
+- Pausa de 10 minutos después de un intento fallido y de 2 minutos después de uno exitoso; a lo sumo 6 intentos en 24 horas, contando juntos el panel, la terminal y todos los procesos de la PC.
 - Si aparece un captcha, otro factor, un cambio de contraseña forzado o políticas pendientes, se detiene y lo dice.
 
 **Registro:** cada login queda registrado en el Campus (evento de inicio de sesión y último acceso).
 
-**Desactivarlo:** `auth web autologin disable --profile udesa-docente` borra la contraseña y las cookies recordadas.
+**Desactivarlo:** `auth web autologin disable --profile udesa-docente` borra la contraseña y la confianza. La sesión abierta sigue hasta que vence.
 
-**Correos con código:** cuando el MCP necesita el código, te llega el correo de siempre. Escribí el código en el diálogo (o en la terminal con `enable`). **No uses el enlace del correo para avisar que no fuiste vos:** revoca el factor correo de toda la cuenta, cierra todas tus sesiones y puede suspender la cuenta. Usalo sólo si de verdad no reconocés el intento (el MCP se identifica como `udesa-campus-mcp` en el correo).
+**Migración (una sola vez):** la primera vez que corre la versión con ADR-142, adopta la cookie y la confianza del keyring y el estado de `web-autologin.json` sin iniciar sesión; el archivo viejo queda como `web-autologin.json.migrated`. Para volver a una versión anterior: renombrarlo de nuevo a `web-autologin.json` y repetir `enable`. Después de actualizar, reiniciá los clientes MCP para que ningún servidor viejo siga escribiendo el estado anterior.
 
-**Cambiar la contraseña del Campus** con el login automático activo: primero `auth web autologin disable` en cada computadora donde esté activo y `remote autologin disable` + deploy si está en el remoto; después cambiala; después `enable` de nuevo en cada lugar. Así no se juntan rechazos que acerquen la cuenta al bloqueo. Cambiar la contraseña no revoca la confianza del dispositivo.
+**Correos con código:** cuando el MCP necesita el código, te llega el correo de siempre. Escribí el código en el panel, en el diálogo o en la terminal con `enable`. **No uses el enlace del correo para avisar que no fuiste vos:** revoca el factor correo de toda la cuenta, cierra todas tus sesiones y puede suspender la cuenta. Usalo sólo si de verdad no fuiste vos.
+
+**Cambiar la contraseña del Campus** con el login automático activo: primero `auth web autologin disable` en cada computadora donde esté activo y `remote autologin disable` + deploy si está en el remoto; después cambiala; después `enable` de nuevo en cada lugar. Así no se juntan rechazos que acerquen la cuenta al bloqueo.
+
+## Login web automático en la PC (recomendado)
+
+Es el **método recomendado** para la sesión web en la PC (ADR-142, decisión del dueño; antes era opcional y no recomendado, ADR-088). Guarda tu contraseña del Campus en el Administrador de credenciales, y con ella el **MCP local** inicia sesión en la web solo cuando la sesión venció. Para el remoto (Vercel): [Login web automático en el remoto](#login-web-automático-en-el-remoto).
+
+La sesión, la confianza del dispositivo, los intentos y las renovaciones viven en **un** registro de esta PC (`web-connection.json` en el directorio del perfil, cifrado con la clave `…|web_connection_box` del Administrador de credenciales). Lo comparten todos los procesos locales (`serve`, `serve-full`, la CLI y la tarea de keepalive): dos procesos con la sesión vencida hacen **un** solo login. Es el mismo modelo que el remoto (ADR-141).
+
+1. **Puesta en marcha**, una vez, en tu terminal. Pide usuario, contraseña y el código que el Campus te manda al correo. La PC queda como **dispositivo de confianza** (en UdeSA, 28 días):
+
+   ```bash
+   node build/cli.js auth web autologin enable --profile udesa-docente
+   ```
+
+2. **Segunda llave:** agregá `CAMPUS_WEB_AUTOLOGIN=true` a la entrada del cliente MCP (`udesa-campus` y, si la usás, `udesa-campus-completo`) y abrí una sesión nueva. Sin la variable, los servidores no usan la contraseña.
+3. **Uso:**
+   - Cuando una herramienta necesita la sesión web y está vencida, el servidor inicia sesión solo y sigue.
+   - Cuando vence la confianza del dispositivo, abre un **diálogo de Windows** para el código del correo. No lo escribas en el chat.
+   - Si el diálogo no abre, la herramienta devuelve `AUTH_REQUIRED` con el comando del panel local: renová con el paso 4.
+
+4. **Renovar la confianza (cada ~28 días, o antes):** el panel de conexión de esta PC.
+
+   ```bash
+   node build/cli.js auth web panel --profile udesa-docente
+   ```
+
+   - Abre tu navegador en `http://127.0.0.1:<puerto>/<secreto>/conexion`. Sólo responde en esta PC; el secreto de la dirección es la llave mientras está abierto: no lo compartas.
+   - Los pasos son los del remoto: «Enviar código y renovar», escribir el código del correo en el panel y «Confirmar y verificar». Termina con una comprobación automática.
+   - El panel **nunca pide la contraseña**: si no hay login automático, muestra el comando de la terminal.
+   - Se cierra solo después de una renovación verificada, a los 15 minutos sin uso o con Ctrl+C. Con `--no-open` sólo muestra el enlace.
+   - También se puede renovar desde la terminal, repitiendo el paso 1.
+
+**Estado, vencimiento de la confianza e intentos:** `auth web autologin status --profile udesa-docente`, o `campus_get_status` (`connection`, con `mode: "local"`). El aviso llega 7 días antes del vencimiento.
+
+### Síntomas por capa en la PC
+
+| `campus_get_status` → `connection` | Qué pasa | Qué hacer |
+|---|---|---|
+| `method: "none"`, `action.kind: enable_local_autologin` | La PC no tiene sesión web ni login automático | `auth web autologin enable` (recomendado) o, como respaldo, `auth web import --clipboard` |
+| `method: "cookie"`, `web_session.estimated_expires_if_idle_at` cerca | Cookie importada a punto de vencer por inactividad | Usarla o activar el login automático para no reimportarla |
+| `device_trust.state: expiring` o `expired`, `action.kind: renew_local_trust` | La confianza del dispositivo vence o venció | `auth web panel` (o el diálogo, si lo ofrece el servidor) |
+| `renewal.state: uncertain`, `action.kind: review_attempt` | Un intento quedó sin resultado confirmado | Revisá Sesiones del navegador en el Campus; el panel ofrece «Iniciar otra renovación». Nunca se reenvía solo |
+| `persistence.state: failed` (`kv_unavailable`) | El archivo de la conexión está dañado o tomado | No se pisa solo. Revisá `web-connection.json`; para empezar de cero, movelo de lugar y repetí `auth web autologin enable` |
+| `persistence.state: failed` (`config_conflict`) | Se perdió la clave de cifrado del Administrador de credenciales | Repetí `auth web autologin enable` |
+
+**Guardas:**
+- Si el Campus rechaza la contraseña o el código, el login automático se **desactiva**. Nunca reintenta, porque cada fallo suma al bloqueo de la cuenta.
+- Pausa de 10 minutos después de un intento fallido y de 2 minutos después de uno exitoso; a lo sumo 6 intentos en 24 horas, contando juntos el panel, la terminal y todos los procesos de la PC.
+- Si aparece un captcha, otro factor, un cambio de contraseña forzado o políticas pendientes, se detiene y lo dice.
+
+**Registro:** cada login queda registrado en el Campus (evento de inicio de sesión y último acceso).
+
+**Desactivarlo:** `auth web autologin disable --profile udesa-docente` borra la contraseña y la confianza. La sesión abierta sigue hasta que vence.
+
+**Migración (una sola vez):** la primera vez que corre la versión con ADR-142, adopta la cookie y la confianza del keyring y el estado de `web-autologin.json` sin iniciar sesión; el archivo viejo queda como `web-autologin.json.migrated`. Para volver a una versión anterior: renombrarlo de nuevo a `web-autologin.json` y repetir `enable`. Después de actualizar, reiniciá los clientes MCP para que ningún servidor viejo siga escribiendo el estado anterior.
+
+**Correos con código:** cuando el MCP necesita el código, te llega el correo de siempre. Escribí el código en el panel, en el diálogo o en la terminal con `enable`. **No uses el enlace del correo para avisar que no fuiste vos:** revoca el factor correo de toda la cuenta, cierra todas tus sesiones y puede suspender la cuenta. Usalo sólo si de verdad no fuiste vos.
+
+**Cambiar la contraseña del Campus** con el login automático activo: primero `auth web autologin disable` en cada computadora donde esté activo y `remote autologin disable` + deploy si está en el remoto; después cambiala; después `enable` de nuevo en cada lugar. Así no se juntan rechazos que acerquen la cuenta al bloqueo.
 
 ## Login web automático en el remoto
 

@@ -102,6 +102,8 @@ export interface WebSessionSource {
      * esa: una importada mientras tanto (por ejemplo, mientras corría la tarea de keepalive) se conserva.
      */
     invalidate(revision?: string | null): Promise<void>;
+    /** Local (ADR-142): registra el último uso exitoso de la sesión `revision` (sin efectos en el Campus). */
+    touch?(revision: string | null): Promise<void>;
 }
 
 export function webSecretAccount(profileId: string, siteUrl: string): string {

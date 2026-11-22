@@ -23,6 +23,7 @@ import { WebApprovalConfirmer } from "../write/confirm.js";
 import { assertWriteServerMayStart, loadWriteProfile, type WriteProfile } from "../write/policy.js";
 import { KvWriteStore, UpstashKv, type KvClient } from "../write/store.js";
 import { createDownloadLinks, type DownloadLinks } from "./download-links.js";
+import { esc, page } from "./page.js";
 import { readZipDirectory, readZipEntry, ZIP_LIMITS } from "../documents/zip.js";
 
 /**
@@ -760,40 +761,6 @@ function cors(res: Response) {
     res.headers.set("access-control-allow-headers", "authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id");
     res.headers.set("access-control-expose-headers", "www-authenticate, mcp-session-id");
     return res;
-}
-
-function esc(s: string) {
-    return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
-}
-
-const REPO_URL = "https://github.com/changazo/udesa-mcp";
-const CAFECITO_URL = "https://cafecito.app/changazo";
-/** Marca de GitHub (octicon mark-github, 16×16). */
-const GITHUB_ICON = `<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0c4.42 0 8 3.58 8 8a8.01 8.01 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>`;
-
-/** Plantilla de las páginas del remoto: sobria, con los colores del logo; claro y oscuro. */
-function page(title: string, body: string, extraHead = "") {
-    return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">${extraHead}
-<style>
-:root{--green:#329C32;--blue:#014A94;--pink:#C887B9;--ink:#1d2433;--muted:#5b6475;--bg:#f6f7f9;--card:#fff;--line:#e3e6eb;--code:#eef1f4}
-@media (prefers-color-scheme:dark){:root{--ink:#e8eaee;--muted:#9aa3b2;--bg:#0f1115;--card:#171a20;--line:#2a2f38;--code:#232831;--blue:#5b9be0}}
-*{box-sizing:border-box}
-body{font:16px/1.55 system-ui,"Segoe UI",sans-serif;margin:0;padding:48px 16px;color:var(--ink);background:var(--bg)}
-main{max-width:600px;margin:0 auto;background:var(--card);border:1px solid var(--line);border-top:4px solid var(--green);border-radius:12px;padding:28px 32px}
-header{display:flex;align-items:center;gap:14px;margin-bottom:8px}
-.logo{width:56px;height:56px;flex:none}
-h1{font-size:1.35rem;line-height:1.25;margin:0;color:var(--blue)}
-a{color:var(--blue)}
-.warn{background:#fff4e5;color:#3d2a00;border-left:4px solid #f0a020;padding:8px 12px;border-radius:4px}
-button{font:inherit;padding:10px 18px;border-radius:8px;border:0;background:var(--blue);color:#fff;cursor:pointer}
-button:hover{filter:brightness(1.1)}
-code{background:var(--code);padding:1px 5px;border-radius:4px;font-size:.92em}
-footer{max-width:600px;margin:16px auto 0;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;font-size:.9rem}
-footer a{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:var(--card);color:var(--muted);text-decoration:none}
-footer a:hover{color:var(--ink);border-color:var(--muted)}
-</style>
-</head><body><main><header><img class="logo" src="/logo.png" alt="" width="56" height="56"><h1>${esc(title)}</h1></header>${body}</main>
-<footer><a href="${REPO_URL}" rel="noopener">${GITHUB_ICON}GitHub</a><a href="${CAFECITO_URL}" rel="noopener">☕ Invitame un cafecito</a></footer></body></html>`;
 }
 
 function landing(ok: boolean) {
