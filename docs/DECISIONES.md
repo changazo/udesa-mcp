@@ -152,7 +152,7 @@ Estado de cada decisión. El estatus completo está en la línea **Estatus** de 
 | [140](#adr-140--vista-previa-de-cambios-de-texto-enriquecido) | Vista previa de cambios de texto enriquecido | adoptada |
 | [141](#adr-141--renovación-de-la-conexión-web-del-remoto-desde-un-panel-privado) | Renovación de la conexión web del remoto desde un panel privado | adoptada |
 | [142](#adr-142--conexión-web-del-mcp-local-con-el-modelo-del-remoto) | Conexión web del MCP local con el modelo del remoto | adoptada |
-| [143](#adr-143--foros-período-de-visualización-y-enviar-sin-demora) | Foros: período de visualización y «enviar sin demora» | adoptada; pruebas reales de escritura pendientes |
+| [143](#adr-143--foros-período-de-visualización-y-enviar-sin-demora) | Foros: período de visualización y «enviar sin demora» | adoptada; validada en real |
 
 ## ADR-001 · Ubicación y alcance del runtime
 
@@ -2831,7 +2831,7 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
 
 ## ADR-143 · Foros: período de visualización y «enviar sin demora»
 
-**Fecha:** 2026-11-22 · **Estatus:** adoptada; pruebas reales de escritura pendientes de una autorización aparte del dueño · **Origen:** directiva `DIRECTIVA_MCP_FOROS_PROGRAMACION_Y_NOTIFICACION.md`: programar el «Mostrar inicio / final» de una discusión y marcar «Enviar notificaciones del tema sin tiempo de espera para edición».
+**Fecha:** 2026-11-22 · **Estatus:** adoptada; validada en real el 22/11/2026 en un foro de prueba del sandbox, con autorización del dueño · **Origen:** directiva `DIRECTIVA_MCP_FOROS_PROGRAMACION_Y_NOTIFICACION.md`: programar el «Mostrar inicio / final» de una discusión y marcar «Enviar notificaciones del tema sin tiempo de espera para edición».
 
 **Hecho decisivo (Moodle 5.1.9):**
 - `mod_forum_add_discussion` fuerza `timestart=0`, `timeend=0` y `mailnow=0` y no los admite en `options`.
@@ -2890,7 +2890,14 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
 **Límites:**
 - Moodle interpreta las fechas en la zona horaria de la cuenta del Campus. Si difiere de la del perfil, la verificación lo marca como diferencia, pero la publicación ya ocurrió con ese instante.
 - `mailnow` acelera el procesamiento; la entrega depende del cron, las suscripciones y los resúmenes.
-- Faltan las pruebas reales de escritura (alta programada, «sin demora», edición del período, respuesta rápida): esperan la autorización aparte del dueño.
+- **Validado en real (22/11/2026, con autorización del dueño, en un foro de prueba del sandbox con suscripción opcional):** todo terminó en `aplicado_verificado`:
+  - alta programada (inicio a dos días y fin a cinco), con `timestart`, `timeend` y `mailnow=false` releídos de `mod_forum_get_forum_discussions`;
+  - cambio del período (inicio corrido y fin quitado), con contenido intacto;
+  - deshacer de ese cambio (período restaurado);
+  - borrado de la discusión;
+  - aviso «sin demora» (R3, con `mailnow=1` releído);
+  - respuesta pública «sin demora» y su borrado.
+- Sin probar en real: la respuesta privada «sin demora», la combinación de inicio futuro con «sin demora» (bloqueada) y foros con grupos.
 
 **Tests:** `write-forum-period.test.ts` (21):
 - **Fechas:** formato, calendario, rango y zona.
