@@ -92,8 +92,11 @@ export function decodeSnapshot(raw: string): WebSessionSnapshot {
 export interface WebSessionSource {
     readonly kind: "keyring" | "env" | "kv" | "memory";
     load(): Promise<WebSessionSnapshot | null>;
-    /** Guarda una renovación validada. En remoto no es posible: lo explica el error. */
-    save(s: WebSessionSnapshot): Promise<void>;
+    /**
+     * Guarda una renovación validada. Con `baseRevision` (rotación dentro de una operación, ADR-141), sólo si
+     * la guardada sigue siendo esa: una operación vieja no pisa una sesión publicada después.
+     */
+    save(s: WebSessionSnapshot, baseRevision?: string | null): Promise<void>;
     /**
      * Descarta la sesión rechazada en este contexto. Con `revision`, sólo si la guardada sigue siendo
      * esa: una importada mientras tanto (por ejemplo, mientras corría la tarea de keepalive) se conserva.

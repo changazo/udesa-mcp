@@ -2184,7 +2184,7 @@ Falta la prueba con una cuenta de estudiante, que necesita su inicio de sesión.
 
 ## ADR-127 · Login web automático en el servidor remoto
 
-**Fecha:** 2026-10-22 · **Estatus:** adoptada como excepción explícita del dueño; extiende ADR-088 al remoto · **Origen:** desde ChatGPT web, una escritura que usa la sesión web falló con `AUTH_REQUIRED`: el remoto sólo tenía el snapshot fijo de `CAMPUS_WEB_SESSION`, que vence a las 4 h sin uso, y no podía iniciar sesión solo. El keepalive no es opción: ni en la PC (ADR-087) ni en la nube, porque genera actividad artificial. Guardar la contraseña en un servicio de terceros requiere que tu institución lo permita.
+**Fecha:** 2026-10-22 · **Estatus:** adoptada como excepción explícita del dueño; extiende ADR-088 al remoto; renovación, almacenamiento y recuperación reemplazados por ADR-141 · **Origen:** desde ChatGPT web, una escritura que usa la sesión web falló con `AUTH_REQUIRED`: el remoto sólo tenía el snapshot fijo de `CAMPUS_WEB_SESSION`, que vence a las 4 h sin uso, y no podía iniciar sesión solo. El keepalive no es opción: ni en la PC (ADR-087) ni en la nube, porque genera actividad artificial. Guardar la contraseña en un servicio de terceros requiere que tu institución lo permita.
 **Decisión:**
 - **Sesión web en el KV de Upstash,** cifrada con AES-256-GCM y una clave derivada de `OAUTH_SIGNING_SECRET`. La comparten todas las instancias y los dos núcleos (`/mcp`, y `/mcp-completo` y `/mcp-escritura`). Las rotaciones del Campus se guardan. `CAMPUS_WEB_SESSION` queda como semilla: una publicación nueva gana sobre lo guardado y una semilla rechazada no se reintenta. El KV de la sesión web no depende de las escrituras.
 - **Login automático** con la misma lógica y las mismas guardas que el local (ADR-088 y ADR-121), con un backend propio:
@@ -2614,3 +2614,151 @@ Se corrigen las descripciones y advertencias de mensajes y calificación que ide
 - `plan-preview.test.ts` (unitario, 18): extractores (`section_summary`, `patch_section_summary`, `edit_activity_text`, `create_content`, `post_edit` sin cambios, intención sin fila por el genérico, plan sin texto enriquecido); saneamiento (scripts, `on*`, `meta refresh`, estilos, `link`, `@@PLUGINFILE@@` y `pluginfile.php` como recuadros, `data:` conservada, iframe, SVG, formularios); CSP antes del estilo, nonce y rótulo escapado; PNG (ida y vuelta, los cinco filtros, franja y recorte); búsqueda de Chrome y Edge (variable de entorno, rutas de Windows, macOS y Linux); invocación con un `spawn` falso (argumentos, perfil temporal, carpeta borrada, errores); `planPreview` con un renderer falso (rótulos, recorte, corte a 2400 px, sin navegador).
 - `plan-preview.test.ts` (integración, 5): plan real de `patch_section_summary` contra el Moodle sintético, por MCP, con un renderer falso (bloques texto e imagen, `@@PLUGINFILE@@` saneado, «después» con el cambio, sin POST); remoto (`UNSUPPORTED_CONTENT` sin dibujar); plan sin texto, sin navegador y plan inexistente. Dos tests con el Chrome o Edge local, que se omiten si no hay navegador: dibujo real (ancho ≤ 1200, recortado al contenido; `CAMPUS_PREVIEW_OUT` guarda los PNG) y HTML hostil sin sanear contra un servidor local (ningún píxel rojo, ningún pedido).
 - Prueba real local (Windows 11, Chrome en `C:\Program Files\Google\Chrome\Application\chrome.exe`): 2 PNG de 900 × 312 px para el parche de la tabla de horarios; la celda pasa de «Martes (extraordinario)» a «Miércoles» y el ícono es un recuadro. No quedaron carpetas `campus-vista-*`.
+
+## ADR-141 · Renovación de la conexión web del remoto desde un panel privado
+
+**Fecha:** 2026-11-22 · **Estatus:** adoptada; extiende ADR-127 y se apoya en ADR-088, ADR-121 y ADR-134 · **Origen:** directiva del dueño. Con ADR-127, renovar la confianza del dispositivo del remoto (cada 28 días) exigía la PC original, la CLI, un código por correo en la terminal y `vercel deploy --prod`, con apenas 3 días de aviso. Además, la sesión, la confianza y el estado del login automático vivían en claves separadas del KV, sin cercos entre instancias ni entre despliegues.
+
+**Decisión:**
+- **Renovación habitual en el navegador, en `/admin/conexion`** (`src/remote/connection-handler.ts`), sin PC ni redeploy:
+  - Pide el GitHub del dueño, con la misma cookie de aprobador que `/aprobar` y `/admin/escrituras`. El callback de GitHub vuelve al panel que lo pidió (tabla cerrada `ADMIN_DESTINATIONS`).
+  - Además, un **vínculo con el navegador**: la cookie `__Host-campus_connection`, aleatoria, `HttpOnly; Secure; SameSite=Strict`. El desafío guarda sólo su HMAC: el código vale únicamente en el navegador que lo pidió.
+  - **El GET sólo muestra:** nunca inicia sesión en el Campus ni manda correos.
+  - Cada acción (`iniciar`, `completar`, `cancelar`, `diagnosticar`, `activar`) es un POST. Antes de cualquier efecto, el POST se rechaza si le falta alguna de estas condiciones:
+    - `Origin` igual a la URL pública (si falta, se rechaza);
+    - cuerpo `application/x-www-form-urlencoded` de hasta 4 KB;
+    - formulario firmado para esa acción, ese dueño y ese navegador, con vencimiento a los 10 minutos (token `connform`);
+    - marca de un solo uso en el KV: repetir un formulario muestra el estado sin hacer nada nuevo.
+  - Después de cada POST: 303 → GET, con valores de listas cerradas (`estado`, `motivo`, `codigo`, `diag`). El código nunca aparece en una URL ni en los logs.
+  - **El código se escribe en el panel, nunca en el chat:**
+    - campo `inputmode=numeric autocomplete=one-time-code maxlength=6`;
+    - ayuda «No recibí el código»;
+    - horas en hora de Argentina.
+  - Funciona aunque las escrituras estén apagadas o frenadas: no depende del almacén de escrituras (ADR-134).
+- **Login reanudable en dos pasos** (`src/web/login.ts`):
+  - `beginPasswordLogin` envía la contraseña y se detiene en el MFA con una continuación serializable (`MfaContinuation`: cookies, campos del formulario del correo, presupuesto restante).
+  - `completePasswordLogin` envía el código una sola vez. Una instancia de Vercel pide el código y otra puede confirmarlo.
+  - `passwordLogin` queda como envoltorio, sin cambios para el local.
+  - Los errores llevan `details.credentials_sent`, que separa «falló antes de enviar» de «incierto después de enviar».
+  - Un código mal formado no se envía ni consume el factor.
+- **Una renovación explícita no manda la confianza anterior.** Si la mandara, Moodle entraría sin emitir una nueva.
+  - Sólo se publica una candidata del usuario esperado con una `MFA_TOKEN_<userid>` nueva y vencimiento real (margen de 30 min).
+  - La candidata se arma en un transporte aislado: si falla o la cancelan, la sesión vigente queda intacta.
+- **Registro v2 único con CAS** (`src/remote/connection-store.ts`, clave `conn2:<perfil>:<userid>:<hash del sitio>`):
+  - Guarda:
+    - la sesión y la confianza, selladas con AES-GCM;
+    - `config_epoch`, `config_fingerprint` y `auth_generation`;
+    - las guardas: intentos, último resultado, desactivación y transición pendiente;
+    - los recibos de 24 h y el último diagnóstico.
+  - Cada transición es un `EVAL` de comparar y cambiar, con 25 reintentos acotados.
+  - Un registro dañado o de versión desconocida es un error, nunca «vacío».
+  - El desafío y la candidata van en claves laterales con `EX 600`.
+  - El candado del login automático es `SET NX EX 90`. Sólo lo libera su dueño, con comparar y borrar.
+- **Tres versiones distintas:**
+  - `config_epoch` y la huella cercan despliegues: una instancia de epoch menor no escribe ni inicia sesión (`stale_instance`), y la misma epoch con otra huella es `config_conflict`.
+  - `auth_generation` sube con cada publicación: panel, login automático o activación.
+  - `session_revision` cerca las rotaciones: una operación abierta antes de una renovación no pisa la sesión nueva al guardar su rotación ni al invalidar.
+- **Máquina de estados de la renovación:** `idle`, `starting`, `awaiting_code`, `submitting`, `candidate_ready`, `committed`, `failed`, `uncertain`, `expired`, `cancelled`, `superseded`.
+  - Iniciar y confirmar se reservan por CAS antes de tocar Moodle:
+    - dos inicios simultáneos mandan un solo correo;
+    - dos confirmaciones simultáneas envían el código una sola vez.
+  - Un corte después de enviar queda `uncertain` y **nunca se reenvía solo**. Para rearmar hace falta un POST explícito: «Iniciar otra renovación».
+  - Un corte entre validar y publicar deja `candidate_ready`. Otra instancia lo publica sin volver a Moodle (`resume`, también desde «Diagnosticar»).
+  - Las guardas de ADR-088/121 sobreviven a instancias y deploys:
+    - 6 intentos en 24 h;
+    - pausa de 2 min después de un intento correcto y de 10 min después de uno fallido.
+  - Un código rechazado se recupera desde el panel cuando termina la pausa. Una contraseña rechazada exige la CLI.
+- **El login automático remoto usa el mismo coordinador:**
+  - `preflight` revisa los cercos, si hay una renovación en curso, la desactivación y la confianza vigente;
+  - publica por el mismo camino, con generación nueva y recibo;
+  - no compite con una renovación del panel en curso;
+  - sin confianza no sale ningún correo, igual que en ADR-127.
+- **Diagnóstico automático** después de cada renovación o activación (`src/remote/connection-diagnostics.ts`):
+  - Comprueba:
+    - relee lo persistido;
+    - verifica la API REST (un error de red da `unknown`, nunca verde);
+    - prueba la sesión web en un transporte aislado, sin login automático;
+    - identidad y confianza.
+  - El resultado es `ready`, `partial` o `failed`. Sólo se guarda si la generación y la epoch no cambiaron.
+  - Un diagnóstico de otra generación se muestra como `superseded`.
+- **MCP:**
+  - `campus_get_status` suma el parámetro `verify_web` (prueba aislada de la sesión publicada, sin iniciar sesión).
+  - Suma también el campo `connection`, que separa las capas (`api_token`, `web_session`, `device_trust`, `persistence`, `renewal`, `activation`, `last_diagnostic`), cada una con la fecha de su evidencia, más una `action`.
+  - Con `verify` y `verify_web` juntos, corre el diagnóstico completo.
+  - `AUTH_REQUIRED` de la sesión web trae:
+    - `details.component = "web_session"`;
+    - `details.reason`, del catálogo cerrado de 17 motivos;
+    - `details.recovery = {kind, url, requires_human}`: `renew_web_trust` y `activate_recovery` llevan la URL del panel; `cli_recovery`, `wait` y `review_attempt` no.
+  - Las instrucciones del servidor dicen que hay que mostrar el enlace, no pedir códigos, verificar con los dos flags antes de afirmar que funciona y no repetir escrituras interrumpidas.
+- **Aviso de vencimiento a los 7 días** (antes, 3), en `connection.device_trust` y `web_autologin.action_needed`.
+- **Recuperación excepcional desde la PC: `campus remote autologin renew [--redeploy]`** (`enable` queda como nombre anterior, sin desplegar).
+  - Hace un login aislado con código y publica una sola variable sensible, **`CAMPUS_WEB_BOOTSTRAP`**: un sobre v2 de todo o nada `{v:2, activation_epoch, mode, login, trust, session}`. La segunda llave sigue siendo `CAMPUS_WEB_AUTOLOGIN=true`.
+  - Borra `CAMPUS_WEB_LOGIN`, `CAMPUS_WEB_TRUST` y `CAMPUS_WEB_SESSION`.
+  - Informa estados honestos (`candidate_validated`, `configuration_published_pending_deploy`, `deployed_pending_verification`). Nunca dice «verificado».
+  - El remoto ve la epoch mayor como `activation_pending`. «Activar y verificar recuperación» prueba la sesión del sobre, sin contraseña ni código, y la adopta por CAS.
+  - Si la sesión del sobre venció, la activación queda `rejected` y la conexión anterior sigue.
+  - `disable` publica `{mode:"disabled"}` con epoch mayor. El remoto lo aplica sin login:
+    - retira la confianza;
+    - cancela los desafíos;
+    - deja la sesión abierta hasta que vence;
+    - impide volver a una configuración vieja.
+  - `push-web-session` queda retirado: se niega y explica la alternativa.
+- **La configuración se centraliza en `readRemoteConfig`.**
+  - Con un sobre presente, se valida completo y no se mezcla con lo legacy.
+  - Sin sobre, lo legacy vale como epoch 0.
+  - `handler.ts` ya no lee `CAMPUS_WEB_SESSION` por su cuenta.
+- **Migración sin login.** Si no existe el registro v2:
+  - se adoptan las claves legacy (`web:<perfil>:session|trust|autologin`), con sus huellas de semilla, como epoch 0 y con CAS de ausencia;
+  - se conservan los intentos, las desactivaciones y la necesidad de confianza;
+  - un intento legacy en curso queda como `attempt_uncertain`, para revisar;
+  - un estado legacy dañado es un error, no un estado vacío.
+
+**Ajustes justificados respecto de la directiva:**
+- Sobre único `CAMPUS_WEB_BOOTSTRAP` (la opción recomendada), no un manifiesto de varias variables.
+- La activación de una recuperación es sólo explícita, desde el POST del panel. No se adopta sola antes de una operación web común: así una lectura nunca cambia la configuración vigente.
+- «Diagnosticar» primero publica una candidata validada que haya quedado pendiente y después comprueba. No toca Moodle con credenciales.
+- Los recibos guardan 24 h de renovaciones. Repetir una confirmación ya publicada devuelve el recibo, aunque después haya habido otra generación.
+- `MemoryKv` (el KV de los tests) ahora vence claves con un reloj controlable y entiende comparar y borrar. Antes registraba el TTL pero nunca lo aplicaba.
+- Las páginas del panel usan `Referrer-Policy: same-origin`, no `no-referrer` como el resto del remoto. Con `no-referrer` Chrome manda `Origin: null` en los POST del formulario y el control de origen rechazaba todo. Lo detectó la primera prueba real; `same-origin` conserva el control estricto sin filtrar nada hacia afuera.
+
+**Límites:**
+- No hay rollback transparente a un binario anterior a v2, que no entiende los cercos ni comparte el registro. Volver atrás exige una versión que entienda v2 o una recuperación explícita (ver REMOTO_VERCEL.md).
+- Rotar `OAUTH_SIGNING_SECRET` impide descifrar el registro. Se informa como `config_conflict` y se recupera con `renew --redeploy`; no equivale a un almacén vacío.
+- El diagnóstico de una recuperación por CLI recién existe después de activarla en el panel: la CLI no puede verificar producción.
+- La confianza del remoto sigue durando 28 días (política del Campus). La renovación sigue siendo mensual, pero desde el navegador.
+
+**Tests:**
+- `connection-service.test.ts` (33):
+  - Renovación:
+    - flujo completo con continuación entre instancias;
+    - renovación sin la confianza anterior;
+    - inicio y confirmación duplicados o simultáneos;
+    - código de otro navegador, mal formado o rechazado (con pausa);
+    - vencimiento del desafío con el reloj del KV;
+    - cancelación;
+    - cortes después de la contraseña, después del código y entre validar y publicar;
+    - candidata sin confianza nueva;
+    - identidad REST distinta;
+    - 6 intentos por día.
+  - Persistencia y cercos:
+    - KV caído y registro dañado;
+    - cerco de rotaciones e `invalidate`;
+    - login automático: preflight tipado, renovación en curso, candado exclusivo y publicación con recibo.
+  - Migración y configuración:
+    - migración legacy sana, dañada y con un intento en curso;
+    - activación por epoch y sobre vencido;
+    - corte `disabled`;
+    - conflicto de huella.
+  - Contratos: 7 días, catálogo de acciones y parser del sobre.
+- `connection-panel.test.ts` (10), de punta a punta por el handler:
+  - GET sin efectos;
+  - renovación completa con 303 cerrados;
+  - CSRF: Origin ausente o ajeno, content-type, sin vínculo, otro navegador, sin dueño, acción cruzada y GET a una acción;
+  - repetición del formulario;
+  - código mal formado;
+  - URL con valores fuera de lista;
+  - cancelar;
+  - `campus_get_status` sin flags, con `verify_web` y con el diagnóstico completo;
+  - acción hacia el panel con la confianza vencida.
+- `remote-autologin-cli.test.ts` (17): recuperación por CLI.
+- Ajustes en `remote.test.ts`, `remote-web-autologin.test.ts` y `web-autologin.test.ts`.

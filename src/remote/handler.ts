@@ -6,9 +6,12 @@ import type { FetchLike } from "../moodle/transport.js";
 import { MemoryMetadataStore } from "../session/metadata.js";
 import { EnvSecretStore } from "../session/secret-store.js";
 import { AutoLogin, autoLoginStatus } from "../web/autologin.js";
-import { EnvWebSessionSource, type WebSessionSource } from "../web/session.js";
-import { webUserAgent, type WebTransport } from "../web/transport.js";
-import { KvAutoLoginBackend, KvSecretBox, KvWebSessionSource, RemoteAutoLogin, webKvPrefix } from "./web-store.js";
+import { EnvWebSessionSource, MemoryWebSessionSource, type WebSessionSource } from "../web/session.js";
+import { WebTransport, webUserAgent } from "../web/transport.js";
+import { KvSecretBox, RemoteAutoLogin } from "./web-store.js";
+import { ConnectionService } from "./connection-service.js";
+import { CONNECTION_PATH, connectionConfig, connectionStatusDeps, handleConnection } from "./connection-handler.js";
+import type { ConnectionStatusDeps } from "../mcp/server.js";
 import { createLogger, type Logger } from "../util/logger.js";
 import { readRemoteConfig, type RemoteConfig } from "./config.js";
 import { OAuthError, safeEqual, SCOPE, SCOPE_WRITE, TokenSigner, type AuthRequest } from "./oauth.js";
@@ -43,6 +46,8 @@ export interface RemoteDeps {
 const APPROVER_COOKIE = "__Host-campus_approver";
 const PLAN_PATH = /^\/aprobar\/(pl_[a-z2-7]{16})$/;
 const ADMIN_PATH = "/admin/escrituras";
+/** Destinos administrativos del login con GitHub: tabla cerrada del servidor (ADR-141). */
+const ADMIN_DESTINATIONS: Record<string, string> = { escrituras: "/admin/escrituras", conexion: "/admin/conexion" };
 /** Un formulario del panel vale 10 minutos y una sola vez. */
 const ADMIN_FORM_TTL_S = 600;
 
@@ -79,7 +84,7 @@ export function createRemoteHandler(deps: RemoteDeps = {}): (req: Request) => Pr
     const logger = deps.logger ?? createLogger();
     const fetchImpl: FetchLike = deps.fetch ?? ((i, init) => fetch(i, init));
     const now = deps.now ?? (() => new Date());
-    let state: { cfg: RemoteConfig; signer: TokenSigner; app: App; write: WriteApp | null; links: DownloadLinks } | null = null;
+    let state: { cfg: RemoteConfig; signer: TokenSigner; app: App; write: WriteApp | null; links: DownloadLinks; conn: ConnectionService | null } | null = null;
 
     const init = () => {
         if (state) return state;
@@ -90,22 +95,24 @@ export function createRemoteHandler(deps: RemoteDeps = {}): (req: Request) => Pr
         }
         const env = deps.env ?? process.env;
         const profile = deps.profile ?? loadProfile({ profileId: env.CAMPUS_PROFILE?.trim() || DEFAULT_PROFILE_ID, env });
-        // ADR-127: con el KV, la sesión web vive ahí (cifrada) y la comparten todas las instancias y los
-        // dos núcleos (lectura y escritura); CAMPUS_WEB_SESSION queda como semilla. Sin KV, snapshot fijo.
+        // ADR-141 (extiende ADR-127): con el KV, la conexión web (sesión, confianza, intentos, renovaciones) es UN
+        // registro v2 compartido por todas las instancias y por los tres endpoints MCP. Sin KV, snapshot fijo.
         const kv: KvClient | null = deps.kv ?? (res.config.kv ? new UpstashKv(res.config.kv.url, res.config.kv.token) : null);
-        const seed = env.CAMPUS_WEB_SESSION?.trim() || null;
         const box = new KvSecretBox(res.config.signingSecret);
-        const prefix = webKvPrefix(profile.profile_id);
-        const webSource: WebSessionSource = kv ? new KvWebSessionSource(kv, box, prefix, seed) : new EnvWebSessionSource(seed);
-        const autoBackend = kv && res.config.autologin ? new KvAutoLoginBackend(kv, box, prefix, res.config.autologin, profile.profile_id) : null;
-        const webRenewHint = autoBackend
-            ? `El servidor inicia sesión solo cuando la sesión web vence; si no pudo, seguí lo que indica el error (${autoBackend.renewHint})`
-            : "Renová la sesión web: importala en tu PC (campus auth web import), publicala con campus remote push-web-session y redesplegá.";
-        /** Login automático remoto (ADR-127) sobre un transporte web: mismo backend (KV) y misma fuente. */
-        const wireAutoLogin = (web: WebTransport | null, target: { webAutoLoginStatus?: (() => Promise<Record<string, unknown>>) | null }) => {
+        const panelUrl = `${res.config.baseUrl}${CONNECTION_PATH}`;
+        let appRef: App | null = null;
+        const conn = kv ? new ConnectionService({ kv, box, profileId: profile.profile_id, siteUrl: profile.site_url, expectedUserId: res.config.expectedMoodleUserId, config: connectionConfig(res.config, box), panelUrl, now, log: (event, fields) => logger.log("info", event, fields), verifyApi: async () => ({ userid: (await appRef!.session.verify()).info.userid }), isolatedTransport: (seed) => new WebTransport({ siteUrl: profile.site_url, source: new MemoryWebSessionSource(seed), expectedUserId: async () => res.config.expectedMoodleUserId, logger, timeoutMs: profile.limits.http_timeout_seconds * 1000, fetch: deps.fetch, renewHint: "", userAgent: webUserAgent("remoto") }) }) : null;
+        const webSource: WebSessionSource = conn ? conn.sessionSource() : new EnvWebSessionSource(res.config.web.sessionSeed);
+        const autoBackend = conn && res.config.autologin ? conn.autoLoginBackend() : null;
+        const webRenewHint = conn
+            ? `El servidor inicia sesión solo cuando la sesión web vence. Si no puede, renová la conexión en ${panelUrl} (te pide el código del correo).`
+            : "Renová la sesión web desde la PC (campus remote autologin renew --redeploy) y configurá el KV para renovarla desde el panel.";
+        /** Login automático remoto sobre un transporte web: el mismo coordinador (registro, intentos y candado). */
+        const wireAutoLogin = (web: WebTransport | null, target: { webAutoLoginStatus?: (() => Promise<Record<string, unknown>>) | null; connection?: ConnectionStatusDeps | null }) => {
+            if (conn) target.connection = connectionStatusDeps(conn);
             if (!web || !autoBackend) return;
             const inner = new AutoLogin({ transport: web, backend: autoBackend, loadSnapshot: () => webSource.load(), now, log: (event, fields) => logger.log("info", event, { mode: "remoto", ...fields }) });
-            web.setAutoLogin(new RemoteAutoLogin(inner, autoBackend.renewHint));
+            web.setAutoLogin(new RemoteAutoLogin(inner, autoBackend.renewHint, panelUrl));
             target.webAutoLoginStatus = () => autoLoginStatus(autoBackend, now());
         };
         // ADR-113: enlaces temporales de descarga, con clave derivada de OAUTH_SIGNING_SECRET.
@@ -134,6 +141,7 @@ export function createRemoteHandler(deps: RemoteDeps = {}): (req: Request) => Pr
             webUserAgent: webUserAgent("remoto"),
             downloadLinks: links,
         });
+        appRef = app;
         wireAutoLogin(app.web, app.serverDeps);
         let write: WriteApp | null = null;
         const w = res.config.write;
@@ -176,7 +184,7 @@ export function createRemoteHandler(deps: RemoteDeps = {}): (req: Request) => Pr
                 write = null;
             }
         }
-        state = { cfg: res.config, signer: new TokenSigner(res.config, now), app, write, links };
+        state = { cfg: res.config, signer: new TokenSigner(res.config, now), app, write, links, conn };
         return state;
     };
 
@@ -193,6 +201,23 @@ export function createRemoteHandler(deps: RemoteDeps = {}): (req: Request) => Pr
         // ADR-113: /descarga/<token>[/<nombre>] — enlace temporal firmado; sin token OAuth (el enlace es la credencial).
         const dl = /^\/descarga\/([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)(?:\/[^/]*)?$/.exec(path);
         if (dl && req.method === "GET") return await serveDownload(s.app, s.links, dl[1]!, logger);
+        // Panel de la conexión con el Campus (ADR-141): errores propios en HTML, sin el catch genérico con CORS.
+        if (path === CONNECTION_PATH || path.startsWith(`${CONNECTION_PATH}/`)) {
+            try {
+                return await handleConnection(req, path, s.cfg, s.signer, s.conn, {
+                    html: (body, status) => html(body, status),
+                    page,
+                    esc,
+                    readBody,
+                    approverOf: (r) => approverOf(s.signer, r),
+                    adminLogin: () => adminLogin(s.cfg, s.signer, "conexion"),
+                    log: (event, fields) => logger.log("info", event, fields),
+                }, now);
+            } catch (e) {
+                logger.log("error", "connection_panel_error", { code: toPublicError(e).code });
+                return html(page("No se pudo completar", "<p>Ocurrió un error en el panel. No se reintentó nada: recargá la página para ver el estado actual.</p>"), 500);
+            }
+        }
         try {
             switch (`${req.method} ${path}`) {
                 case "GET /.well-known/oauth-protected-resource":
@@ -375,7 +400,8 @@ async function githubCallback(
     if (!cookieNonce || !safeEqual(cookieNonce, String(st.nonce))) {
         return fail("Este login no se inició en este navegador. Volvé a conectar desde tu cliente.");
     }
-    if (st.admin === "escrituras" || (typeof st.approve_plan === "string" && /^pl_[a-z2-7]{16}$/.test(st.approve_plan))) {
+    const adminDest = typeof st.admin === "string" ? ADMIN_DESTINATIONS[st.admin] : undefined;
+    if (adminDest || (typeof st.approve_plan === "string" && /^pl_[a-z2-7]{16}$/.test(st.approve_plan))) {
         // Login para la página de aprobación (W5): mismo dueño de GitHub, cookie propia de 8 h.
         const code = q.get("code");
         if (q.get("error") || !code || code.length > 256) return fail("No se completó el login con GitHub.");
@@ -385,7 +411,7 @@ async function githubCallback(
             logger.log("warn", "approver_login_denied", { reason: "github_user_not_allowed" });
             return fail("Esta cuenta de GitHub no está autorizada en este servidor privado.", 403);
         }
-        const res = clearCookie(redirect(new URL(st.admin === "escrituras" ? ADMIN_PATH : `/aprobar/${String(st.approve_plan)}`, cfg.baseUrl)));
+        const res = clearCookie(redirect(new URL(adminDest ?? `/aprobar/${String(st.approve_plan)}`, cfg.baseUrl)));
         res.headers.append("set-cookie", `${APPROVER_COOKIE}=${await signer.issueApprover(who)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=28800`);
         logger.log("info", "approver_login_ok", {});
         return res;
@@ -509,12 +535,12 @@ async function approvalDecision(signer: TokenSigner, write: WriteApp, planId: st
 // ---------- Panel del freno de escrituras (ADR-134) ----------
 
 /** Sin sesión del dueño: login con GitHub (mismo flujo que la aprobación) y vuelta al panel. */
-async function adminLogin(cfg: RemoteConfig, signer: TokenSigner): Promise<Response> {
+async function adminLogin(cfg: RemoteConfig, signer: TokenSigner, dest: "escrituras" | "conexion" = "escrituras"): Promise<Response> {
     const nonce = randomBytes(18).toString("base64url");
     const gh = new URL("https://github.com/login/oauth/authorize");
     gh.searchParams.set("client_id", cfg.github.clientId);
     gh.searchParams.set("redirect_uri", `${cfg.baseUrl}/oauth/github/callback`);
-    gh.searchParams.set("state", await signer.signAdminState(nonce));
+    gh.searchParams.set("state", await signer.signAdminState(nonce, dest));
     gh.searchParams.set("allow_signup", "false");
     const res = new Response(null, { status: 303, headers: { location: gh.toString() } });
     res.headers.append("set-cookie", `${NONCE_COOKIE}=${nonce}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`);

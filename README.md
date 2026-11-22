@@ -41,7 +41,7 @@ Cada resultado trae procedencia, cobertura y advertencias. Un error nunca se pre
 - No hay aprobación fuera del chat (ADR-061). Para R3 y R4 decide el humano: el agente le plantea la acción y sólo ejecuta con su aprobación, o el servidor se la pregunta por elicitación (ADR-118).
 - Notificaciones a participantes permitidas (`allow_participant_notifications: true`, ADR-130). Publicar o responder en Avisos (suscripción forzada) de un curso real y mandar un mensaje privado son R3: el agente te pide aprobación antes. Las calificaciones de tareas y foros solicitan aviso por defecto; se puede desactivar por plan. Con `false`, sólo se notifica a las cuentas de prueba de tu sandbox (`notifiable_user_ids`, ADR-115 y 120). El perfil publicado trae esa lista y la del sandbox vacías: se completan con los tuyos ([PROCESOS.md](docs/PROCESOS.md#escrituras)).
 
-**Sesión web automática** (opcional, no recomendada; ADR-087, ADR-088 y ADR-127). Donde el keepalive no es viable, el MCP local y el remoto pueden iniciar sesión en la web solos, con la contraseña guardada y un dispositivo de confianza de 28 días (el MFA por correo se pide sólo al activarlo o renovarlo).
+**Sesión web automática** (opcional, no recomendada; ADR-087, ADR-088 y ADR-127). Donde el keepalive no es viable, el MCP local y el remoto pueden iniciar sesión en la web solos, con la contraseña guardada y un dispositivo de confianza de 28 días (el MFA por correo se pide sólo al activarlo o renovarlo). En el remoto, la renovación es desde el navegador, en el panel privado `/admin/conexion`: el código del correo se escribe ahí, nunca en el chat (ADR-141).
 
 ## Cómo funciona
 
@@ -95,8 +95,8 @@ node build/cli.js auth web status --profile udesa-docente [--verify]      # --ve
 node build/cli.js auth web keepalive [install|uninstall|status] --profile udesa-docente   # mantener viva la sesión web
 node build/cli.js auth web autologin [enable|disable|status] --profile udesa-docente     # login web automático (opcional, no recomendado)
 node build/cli.js remote push-token        --profile udesa-docente        # token móvil del keyring → Vercel
-node build/cli.js remote push-web-session  --profile udesa-docente        # sesión web del keyring → Vercel
-node build/cli.js remote autologin [enable|disable|status] --profile udesa-docente  # login web automático en Vercel (ADR-127)
+node build/cli.js remote autologin renew --profile udesa-docente --redeploy   # recuperación desde la PC (ADR-141): un código, publica CAMPUS_WEB_BOOTSTRAP y despliega; verificar en /admin/conexion
+node build/cli.js remote autologin [disable|deploy|status] --profile udesa-docente  # corte explícito, reintento de deploy, historial local
 ```
 
 Lista completa: `node build/cli.js` sin argumentos. Cuándo usar cada uno: [docs/PROCESOS.md](docs/PROCESOS.md).

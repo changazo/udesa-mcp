@@ -2,6 +2,8 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:
 import { CampusError } from "../errors.js";
 import { parseStoredLogin, parseTrust, type AutoLoginBackend, type AutoLoginState, type StoredLogin } from "../web/autologin.js";
 import type { WebAutoLogin } from "../web/transport.js";
+import { MFA_CODE_REQUIRED } from "../web/login.js";
+import { webRecoveryDetails, type ConnectionReason } from "./connection-contracts.js";
 import { decodeSnapshot, encodeSnapshot, type WebCookie, type WebSessionSnapshot, type WebSessionSource } from "../web/session.js";
 import type { KvClient } from "../write/store.js";
 
@@ -15,7 +17,8 @@ import type { KvClient } from "../write/store.js";
  *   el KV nunca guarda cookies en claro. El estado no tiene secretos.
  * - Lo que se publica desde la PC (CAMPUS_WEB_SESSION, CAMPUS_WEB_TRUST, CAMPUS_WEB_LOGIN) es la
  *   semilla: cada registro del KV recuerda de qué semilla salió, y una semilla nueva (un `enable` o
- *   un `push-web-session` + deploy) gana sobre lo guardado.
+ *   un `push-web-session` + deploy) gana sobre lo guardado. Desde ADR-141 estas clases sólo quedan como formato
+ *   legacy que lee la migración al registro v2 (connection-service.ts).
  * - La contraseña nunca entra al KV: vive sólo en la variable sensible CAMPUS_WEB_LOGIN.
  */
 
@@ -144,7 +147,7 @@ export class KvAutoLoginBackend implements AutoLoginBackend {
     ) {
         // Un `enable` nuevo (contraseña o confianza distintas) arranca con estado y confianza limpios.
         this.seed = box.fingerprint(`${cfg.login}\n${cfg.trust ?? ""}`);
-        this.renewHint = `En tu PC: campus remote autologin enable --profile ${profileId} (te pide el código del correo) y después vercel deploy --prod.`;
+        this.renewHint = `Renová la conexión desde el panel /admin/conexion del servidor (o, para recuperar, en tu PC: campus remote autologin renew --profile ${profileId} --redeploy).`;
     }
     async loadLogin(): Promise<StoredLogin | null> {
         return parseStoredLogin(this.cfg.login);
@@ -199,16 +202,21 @@ export class RemoteAutoLogin implements WebAutoLogin {
     constructor(
         private readonly inner: WebAutoLogin,
         private readonly renewHint: string,
+        private readonly panelUrl: string | null = null,
     ) {}
     async login() {
         try {
             return await this.inner.login();
         } catch (e) {
             if (!(e instanceof CampusError)) throw e;
+            // Los errores tipados del coordinador (ADR-141) ya traen su acción de recuperación: van tal cual.
+            if (e.details && typeof e.details === "object" && "recovery" in e.details) throw e;
             const message = e.message
-                .replace(/(campus )?auth web autologin enable/g, "campus remote autologin enable (en tu PC) y vercel deploy --prod")
+                .replace(/(campus )?auth web autologin enable/g, "el panel de conexión del servidor")
                 .replace(/(campus )?auth web autologin status/g, "campus_get_status");
-            throw new CampusError(e.code, message, { humanAction: this.renewHint, moodleErrorcode: e.moodleErrorcode, details: e.details });
+            // Resto (guardas del login automático, MFA sin canal): motivo del catálogo cerrado, nunca texto libre en details.
+            const reason: ConnectionReason = e.details?.reason === MFA_CODE_REQUIRED ? "trust_expired" : /intentos|minutos|seguido/.test(e.message) ? "rate_limited" : e.code === "AUTH_REJECTED" ? "credentials_rejected" : "session_expired";
+            throw new CampusError(e.code, message, { humanAction: this.panelUrl ? `Renová la conexión en ${this.panelUrl}` : this.renewHint, moodleErrorcode: e.moodleErrorcode, details: webRecoveryDetails(reason, this.panelUrl) });
         }
     }
 }

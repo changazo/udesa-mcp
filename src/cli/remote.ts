@@ -64,6 +64,55 @@ export async function vercelEnvRm(name: string, environment = "production"): Pro
     });
 }
 
+/** ¿El paquete está vinculado a un proyecto de Vercel (.vercel/project.json)? No lee su contenido. */
+export function vercelProjectLinked(): boolean {
+    return existsSync(join(packageRoot(), ".vercel", "project.json"));
+}
+
+/** ¿Está la CLI de Vercel instalada? Corre `vercel --version` sin mostrar nada ni pasar secretos. */
+export async function vercelAvailable(): Promise<boolean> {
+    const cwd = packageRoot();
+    return new Promise((resolve) => {
+        const child =
+            process.platform === "win32"
+                ? spawn("vercel --version", { cwd, shell: true, stdio: ["ignore", "ignore", "ignore"] })
+                : spawn("vercel", ["--version"], { cwd, stdio: ["ignore", "ignore", "ignore"] });
+        child.on("error", () => resolve(false));
+        child.on("close", (code) => resolve(code === 0));
+    });
+}
+
+export interface VercelDeployResult {
+    ok: boolean;
+    /** Código de salida de `vercel deploy`; null si no se pudo lanzar. */
+    code: number | null;
+    /** Cola recortada de stderr (sin valores: los argumentos son fijos y no hay stdin). */
+    stderr_tail: string;
+}
+
+/**
+ * `vercel deploy --prod --yes` en el proyecto vinculado (ADR-141). Argumentos fijos, sin secretos;
+ * stdout (URL del deployment, progreso) se descarta y sólo se conserva el código y la cola de stderr.
+ * No lanza: el llamador decide qué estado informar.
+ */
+export async function vercelDeployProd(): Promise<VercelDeployResult> {
+    const cwd = packageRoot();
+    if (!vercelProjectLinked()) return { ok: false, code: null, stderr_tail: "El paquete no está vinculado a un proyecto de Vercel (vercel link)." };
+    const args = ["deploy", "--prod", "--yes"];
+    return new Promise((resolve) => {
+        const child =
+            process.platform === "win32"
+                ? spawn(`vercel ${args.join(" ")}`, { cwd, shell: true, stdio: ["ignore", "ignore", "pipe"] })
+                : spawn("vercel", args, { cwd, stdio: ["ignore", "ignore", "pipe"] });
+        let stderr = "";
+        child.stderr.on("data", (d) => {
+            stderr = (stderr + String(d)).slice(-4000);
+        });
+        child.on("error", () => resolve({ ok: false, code: null, stderr_tail: "No se encontró la CLI de Vercel (vercel)." }));
+        child.on("close", (code) => resolve({ ok: code === 0, code, stderr_tail: stderr.trim().slice(-300) }));
+    });
+}
+
 export function newSigningSecret(): string {
     return randomBytes(32).toString("base64url");
 }

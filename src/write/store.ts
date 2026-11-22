@@ -387,22 +387,51 @@ export class UpstashKv implements KvClient {
 /** Compare-and-set: escribe ARGV[2] sólo si la clave vale ARGV[1] ("" = no existe). */
 export const CAS_SCRIPT = "local c = redis.call('GET', KEYS[1]) if (c == false and ARGV[1] == '') or c == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2]) return 1 end return 0";
 
-/** Redis mínimo en memoria con la semántica que usa KvWriteStore (tests). */
+/** Compare-and-delete: borra la clave sólo si vale ARGV[1] (liberar un candado propio, ADR-141). */
+export const CAD_SCRIPT = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0";
+
+/**
+ * Redis mínimo en memoria con la semántica que usan los almacenes (tests). Los vencimientos (EX) se
+ * cumplen de verdad con un reloj controlable (`clock`): una clave vencida deja de existir.
+ */
 export class MemoryKv implements KvClient {
     readonly data = new Map<string, string | string[] | Map<string, number>>();
     readonly ttl = new Map<string, number>();
+    /** Vencimiento absoluto (ms) de cada clave con EX. */
+    readonly expiresAt = new Map<string, number>();
+    /** Reloj de los vencimientos (tests: se adelanta para probar que algo vence). */
+    clock: () => number = () => Date.now();
     commands: string[] = [];
+
+    private purge(key: string) {
+        const at = this.expiresAt.get(key);
+        if (at !== undefined && at <= this.clock()) {
+            this.data.delete(key);
+            this.expiresAt.delete(key);
+            this.ttl.delete(key);
+        }
+    }
 
     async cmd(args: (string | number)[]): Promise<unknown> {
         const [op, key, ...rest] = args.map(String) as [string, string, ...string[]];
         this.commands.push(op);
+        this.purge(key);
+        if (op.toUpperCase() === "MGET") rest.forEach((k) => this.purge(k));
+        if (op.toUpperCase() === "EVAL" && rest[1]) this.purge(rest[1]);
         switch (op.toUpperCase()) {
             case "SET": {
                 const nx = rest.includes("NX");
                 if (nx && this.data.has(key)) return null;
                 this.data.set(key, rest[0]!);
                 const ex = rest.indexOf("EX");
-                if (ex >= 0) this.ttl.set(key, Number(rest[ex + 1]));
+                if (ex >= 0) {
+                    this.ttl.set(key, Number(rest[ex + 1]));
+                    this.expiresAt.set(key, this.clock() + Number(rest[ex + 1]) * 1000);
+                } else {
+                    // Como Redis: un SET sin EX quita el vencimiento anterior.
+                    this.ttl.delete(key);
+                    this.expiresAt.delete(key);
+                }
                 return "OK";
             }
             case "GET":
@@ -443,7 +472,16 @@ export class MemoryKv implements KvClient {
                 return sorted.slice(Number(rest[0]), end < 0 ? sorted.length + end + 1 : end + 1);
             }
             case "EVAL": {
-                // Sólo el compare-and-set (atómico: sin await en el medio).
+                // Sólo los scripts conocidos (atómicos: sin await en el medio).
+                if (key === CAD_SCRIPT) {
+                    const [, k, expected] = rest as [string, string, string];
+                    if (this.data.get(k) === expected) {
+                        this.data.delete(k);
+                        this.expiresAt.delete(k);
+                        return 1;
+                    }
+                    return 0;
+                }
                 if (key !== CAS_SCRIPT) throw new Error("MemoryKv: script no admitido");
                 const [, k, old, next] = rest as [string, string, string, string];
                 const cur = this.data.get(k);
@@ -455,6 +493,7 @@ export class MemoryKv implements KvClient {
             }
             case "EXPIRE":
                 this.ttl.set(key, Number(rest[0]));
+                this.expiresAt.set(key, this.clock() + Number(rest[0]) * 1000);
                 return 1;
             default:
                 throw new Error(`MemoryKv: comando ${op} no implementado`);

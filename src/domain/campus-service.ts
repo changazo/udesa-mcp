@@ -247,7 +247,7 @@ export class CampusService {
         const web = this.deps.web;
         if (!web) {
             throw new CampusError("AUTH_REQUIRED", "Esta lectura necesita una sesión web del Campus y este servidor no tiene una configurada.", {
-                humanAction: "Importá la sesión web con: campus auth web import --profile <perfil> (local) o publicala en el remoto con campus remote push-web-session.",
+                humanAction: "Local: importá la sesión web con campus auth web import --profile <perfil>. Remoto: renová la conexión desde el panel /admin/conexion del servidor.",
             });
         }
         return this.tracked(capability, courseId, async () => {

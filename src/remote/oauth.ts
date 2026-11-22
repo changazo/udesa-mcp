@@ -19,7 +19,7 @@ const REFRESH_TTL = 30 * 86400;
 const CODE_TTL = 120;
 const FLOW_TTL = 600;
 
-export type TokenKind = "client" | "authreq" | "ghstate" | "code" | "access" | "refresh" | "approver" | "approveform" | "adminform";
+export type TokenKind = "client" | "authreq" | "ghstate" | "code" | "access" | "refresh" | "approver" | "approveform" | "adminform" | "connform";
 
 export interface AuthRequest {
     client_id: string;
@@ -268,8 +268,21 @@ export class TokenSigner {
 
     // --- Panel de escrituras (ADR-134): mismo dueño y misma sesión del aprobador ---
 
-    async signAdminState(nonce: string): Promise<string> {
-        return this.sign("ghstate", { admin: "escrituras", nonce }, FLOW_TTL);
+    /** Destino administrativo cerrado (ADR-134, ADR-141): nunca una URL de retorno libre. */
+    async signAdminState(nonce: string, dest: "escrituras" | "conexion" = "escrituras"): Promise<string> {
+        return this.sign("ghstate", { admin: dest, nonce }, FLOW_TTL);
+    }
+
+    // --- Panel de conexión (ADR-141): formularios de propósito propio, atados al dueño y al navegador ---
+
+    async signConnectionForm(claims: { sub: string; action: string; bind: string; renewal_id: string | null; epoch: number; generation: number; jti: string }): Promise<string> {
+        return this.sign("connform", claims, FLOW_TTL);
+    }
+
+    async verifyConnectionForm(token: string, sub: string, action: string, bind: string): Promise<{ renewal_id: string | null; jti: string }> {
+        const p = await this.verify("connform", token);
+        if (p.sub !== sub || p.action !== action || p.bind !== bind || typeof p.jti !== "string" || !/^[A-Za-z0-9_-]{16,64}$/.test(p.jti)) throw new OAuthError("invalid_request", "Formulario del panel de conexión inválido.");
+        return { renewal_id: typeof p.renewal_id === "string" ? p.renewal_id : null, jti: p.jti };
     }
 
     /** Formulario de reanudar: atado al dueño y de UN solo uso (jti, consumido en el almacén). */

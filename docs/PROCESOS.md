@@ -9,12 +9,13 @@ En los comandos, `campus` equivale a `node build/cli.js` ejecutado en la raíz d
 | Credencial | Para qué | Dónde vive | Cómo se renueva | Si se expone |
 |---|---|---|---|---|
 | Token del servicio móvil de Moodle | Todas las herramientas REST (la mayoría) | Local: Administrador de credenciales de Windows. Remoto: `CAMPUS_MOODLE_TOKEN` en Vercel | [Renovar el token móvil](#renovar-el-token-móvil) | [Incidente: token móvil](#token-móvil-expuesto) |
-| Sesión web del Campus (cookie `MoodleSession`) | Estructura de cuestionarios, preguntas, reportes y overrides | Local: keyring. Remoto: `CAMPUS_WEB_SESSION` | [Renovar la sesión web](#renovar-la-sesión-web) | [Incidente: cookie](#cookie-de-sesión-web-expuesta) |
+| Sesión web del Campus (cookie `MoodleSession`) | Estructura de cuestionarios, preguntas, reportes y overrides | Local: keyring. Remoto: registro cifrado de la conexión en el KV (ADR-141) | [Renovar la sesión web](#renovar-la-sesión-web) | [Incidente: cookie](#cookie-de-sesión-web-expuesta) |
 | `OAUTH_SIGNING_SECRET` | Firma los accesos de ChatGPT, Codex y Claude Code al remoto | Sólo en Vercel | `campus remote init-secret --profile udesa-docente` + `vercel deploy --prod` (desconecta a todos los clientes) | Rotarla |
 | Secret de la OAuth App de GitHub | Login con GitHub del remoto | Sólo en Vercel | Generar uno nuevo en GitHub y cargarlo con `vercel env add GITHUB_CLIENT_SECRET production --sensitive` | Revocarlo en GitHub y cargar uno nuevo |
 | Clave de firma de planes de escritura (`write-signing\|<perfil>`) | Detecta planes de escritura alterados en disco ([Escrituras](#escrituras)) | Local: Administrador de credenciales de Windows. Se crea sola la primera vez | Borrarla del Administrador de credenciales: se crea otra y los planes pendientes dejan de valer | Borrarla y volver a planificar |
 | Clave de firma de planes remotos | Igual que la local, para `/mcp-completo` y `/mcp-escritura` | Derivada de `OAUTH_SIGNING_SECRET` (no se guarda aparte) | Rotar `OAUTH_SIGNING_SECRET` | Rotarla |
 | Contraseña del Campus y cookie de dispositivo de confianza (`MFA_TOKEN_<userid>`), **sólo si activaste el login web automático** | Que el MCP local inicie sesión en la web solo (opcional, no recomendado; ADR-088) | Local: Administrador de credenciales de Windows (`web_login`, `web_trust`) | `auth web autologin enable` | Cambiar la contraseña del Campus (cierra todas las sesiones) y `auth web autologin disable` |
+| Contraseña del Campus y confianza del dispositivo **del remoto** | Login web automático del remoto (ADR-127, ADR-141) | Contraseña: `CAMPUS_WEB_BOOTSTRAP` (o, en instalaciones previas, `CAMPUS_WEB_LOGIN`) en Vercel, sensible. Confianza y sesión: registro cifrado en el KV | [Panel `/admin/conexion`](#renovar-la-conexión-lo-habitual-cada-28-días) | Cambiar la contraseña del Campus y `remote autologin disable --redeploy` |
 | `KV_REST_API_TOKEN` (Upstash) | Planes, interruptor, límites y auditoría de las escrituras remotas | Sólo en Vercel (integración del Marketplace) | Regenerarlo en Upstash y redesplegar | Regenerarlo; mientras tanto, quitar `CAMPUS_WRITE_ENABLED` |
 
 Ninguna credencial está en el repositorio. Las variables de Vercel se listan con `vercel env ls production` (no muestra valores sensibles).
@@ -26,6 +27,8 @@ Ninguna credencial está en el repositorio. Las variables de Vercel se listan co
 | `AUTH_REQUIRED` en casi todas las herramientas | Venció o se revocó el token móvil | [Renovar el token móvil](#renovar-el-token-móvil) |
 | `AUTH_REQUIRED` sólo en estructura, preguntas, reportes u overrides, con «sesión web» en el mensaje | Venció la sesión web, o no está configurada | [Renovar la sesión web](#renovar-la-sesión-web) |
 | `AUTH_REQUIRED` en lecturas web con «login web automático» en el mensaje | El login automático está desactivado (rechazo del Campus), frenado por los límites o sin canal para el código | `auth web autologin status`; si está desactivado, [volver a cargarlo](#login-web-automático-opcional-no-recomendado) |
+| En el remoto, `AUTH_REQUIRED` con `details.recovery` (`renew_web_trust`) o `campus_get_status` → `connection.action` | Venció o está por vencer la confianza del dispositivo del remoto | Abrí el panel `/admin/conexion` del remoto y [renová la conexión](#renovar-la-conexión-lo-habitual-cada-28-días); el código va en el panel, nunca en el chat |
+| En el remoto, `connection.action.kind` = `cli_recovery` o `activate_recovery` | La configuración del remoto necesita la recuperación desde la PC, o hay una recuperación publicada sin activar | [Recuperación desde la PC](#recuperación-desde-la-pc-cli-adr-141) o «Activar y verificar recuperación» en el panel |
 | Se abre un diálogo «Campus Virtual — código de verificación» | Venció la confianza del dispositivo (cada ~28 días) y el login automático necesita el código del correo | Escribí ahí el código que llegó a tu correo; nunca en el chat |
 | `IDENTITY_MISMATCH` | La credencial es de otra cuenta de Moodle | Repetir el login o la importación con tu cuenta |
 | El cliente remoto vuelve a pedir autorización | Pasaron 30 días o se rotó la clave de firma | Repetir el flujo de conexión ([CONECTAR_CLIENTES.md](CONECTAR_CLIENTES.md)) |
@@ -50,9 +53,31 @@ Cuándo: `AUTH_REQUIRED` generalizado, o después de una revocación.
    node build/cli.js remote push-token --profile udesa-docente
    ```
 
-   ```bash
-   vercel deploy --prod
-   ```
+El panel muestra hasta cuándo vale la confianza, en hora de Argentina, y cuánto falta. `campus_get_status` avisa desde **7 días antes** (`connection.device_trust.state = "expiring"` y `web_autologin.action_needed`), con el enlace al panel en `connection.action`.
+
+**Si algo no sale:**
+- **«No recibí el código»:** revisá spam y esperá un par de minutos. Si no llega, «Cancelar» y volvé a iniciar cuando termine la pausa (10 minutos después de un intento fallido; 2 minutos después de uno correcto).
+- **«El Campus no aceptó el código»:** puede ser incorrecto o haber vencido (vale 10 minutos). Iniciá otra renovación cuando termine la pausa.
+- **«No pudimos confirmar el resultado del intento»:** hubo un corte justo después de enviar la contraseña o el código. El servidor **no reenvía nada solo**. Revisá tus [sesiones del navegador](https://campusvirtual.udesa.edu.ar/report/usersessions/user.php) y, si querés, apretá «Iniciar otra renovación».
+- **«La renovación quedó guardada. No pudimos comprobar la conexión»:** la renovación está publicada; repetí sólo «Comprobar conexión» (no pide otro código).
+- **Límites:** hasta 6 intentos por día, compartidos con el login automático; el panel dice desde qué hora se puede volver a intentar.
+- Contraseña rechazada, configuración incompleta o en conflicto, token de la API inválido u otra cuenta: el panel no lo puede resolver y pide la recuperación desde la PC (abajo).
+
+### Síntomas por capa
+
+`campus_get_status` en el remoto devuelve `connection` con una capa por credencial y la fecha de su evidencia:
+
+| Capa | Qué es | Si falla |
+|---|---|---|
+| `api_token` | Token móvil de Moodle (`CAMPUS_MOODLE_TOKEN`) | [Renovar el token móvil](#renovar-el-token-móvil) y `remote push-token` + deploy |
+| `web_session` | Sesión web publicada en el KV | La renueva el login automático; si no puede, el panel |
+| `device_trust` | Confianza del dispositivo del remoto (28 días) | Panel (`renew_web_trust`) |
+| `persistence` | Registro cifrado de la conexión en el KV | Esperar; si sigue, recuperación desde la PC |
+| `renewal` / `activation` | Renovación en curso o recuperación pendiente de activar | Esperar o «Activar y verificar recuperación» en el panel |
+
+Un `AUTH_REQUIRED` de la sesión web trae `details.recovery.kind`: `renew_web_trust` o `activate_recovery` (abrir el panel, con la URL en `details.recovery.url`), `review_attempt` (intento incierto: revisar antes de rearmar), `wait` (renovación en curso, pausa o KV) o `cli_recovery` (recuperación desde la PC).
+
+**Uso:** cuando una herramienta remota necesita la sesión web y está vencida, el servidor inicia sesión solo, sin código, mientras la confianza esté vigente. Las guardas son las mismas que en el local: un rechazo de contraseña lo desactiva, y hay pausas y un máximo de 6 intentos por día.
 
 Moodle suele devolver **el mismo** token si el anterior sigue vigente. En ese caso el remoto no necesita cambios. `push-token` valida el token contra Moodle antes de subirlo.
 
@@ -70,17 +95,7 @@ Cuándo: `AUTH_REQUIRED` sólo en las lecturas web. La sesión vence cuando pasa
    node build/cli.js auth web import --profile udesa-docente
    ```
 
-4. Si usás el remoto, publicala y redesplegá:
-
-   ```bash
-   node build/cli.js remote push-web-session --profile udesa-docente
-   ```
-
-   ```bash
-   vercel deploy --prod
-   ```
-
-Después del paso 4, local y remoto comparten **la misma** sesión del Campus: el uso desde cualquiera de los dos la mantiene viva para ambos. El remoto guarda en el KV las cookies que el Campus le rota; las que rota el local quedan en el keyring y no llegan al remoto (`auth web status` y `auth web keepalive` avisan cuando la cookie local ya no coincide con la última publicada desde esta PC). Con el [login web automático remoto](#login-web-automático-en-el-remoto), el remoto tiene su propia sesión y este paso no hace falta.
+La sesión importada es sólo del MCP local. El remoto tiene su propia sesión y su propia confianza, que se renuevan desde su panel ([login web automático en el remoto](#login-web-automático-en-el-remoto)); `remote push-web-session` quedó retirado (ADR-141).
 
 ## Mantener viva la sesión web
 
@@ -136,26 +151,26 @@ Usalo **sólo si el keepalive no es viable** en esa PC (ADR-088). Guarda tu cont
 
 ## Login web automático en el remoto
 
-Con esto, el servidor de Vercel (ChatGPT, Codex o Claude remotos) inicia sesión en la web solo cuando la sesión venció, igual que el local (ADR-127). Requiere el login automático local activo en esta PC, porque reusa su contraseña.
+Con esto, el servidor de Vercel (ChatGPT, Codex o Claude remotos) inicia sesión en la web solo cuando la sesión venció, con un dispositivo de confianza propio del remoto (ADR-127). Desde ADR-141, la **renovación mensual se hace en el navegador**, en el panel privado del servidor, sin la PC ni un redeploy.
 
-1. **Puesta en marcha**, en tu terminal. Hace un login como dispositivo «remoto» y te pide el código que el Campus manda al correo; después publica la contraseña, la confianza y la sesión como variables sensibles de Vercel:
+### Renovar la conexión (lo habitual, cada ~28 días)
 
-   ```bash
-   node build/cli.js remote autologin enable --profile udesa-docente
-   ```
+1. Abrí **`https://<tu-proyecto>.vercel.app/admin/conexion`**. Pide tu GitHub (el mismo de la página de aprobación). Abrirlo no inicia sesión en el Campus ni manda correos.
+2. Apretá **«Enviar código y renovar»**. El servidor inicia sesión en el Campus y el Campus te manda un código al correo institucional (no uses el enlace «no fui yo» del correo).
+3. Escribí el código de seis dígitos **en el panel** (nunca en el chat) y apretá **«Confirmar y verificar»**. El panel publica la sesión y la confianza nuevas y comprueba solo la API, la sesión web, la identidad y la confianza. Termina con «Conexión renovada y verificada» o dice qué capa falló.
+4. Desde el chat, el agente lo confirma con `campus_get_status({verify: true, verify_web: true})`.
 
    ```bash
    vercel deploy --prod
    ```
 
-2. **Uso:** cuando una herramienta remota necesita la sesión web y está vencida, el servidor inicia sesión solo, sin código, y sigue.
-3. **Renovación:** la confianza del remoto dura 28 días. `campus_get_status` lo avisa en `web_autologin.action_needed` desde 3 días antes, y `remote autologin status` muestra el vencimiento. Repetí el paso 1.
+### Recuperación desde la PC (CLI, ADR-141)
 
-**Si el remoto devuelve `AUTH_REQUIRED` en la sesión web,** el mensaje dice qué falta: renovar la confianza (paso 1), o revisar un rechazo de contraseña o un intento cortado. Las guardas son las mismas que en el local: un rechazo lo desactiva hasta un `enable` nuevo, y hay pausas y un máximo de 6 intentos por día.
+La renovación habitual de la conexión web del remoto se hace desde el panel privado `/admin/conexion`. Si el panel no responde o la configuración del servidor quedó inutilizable, la recuperación excepcional se corre en la PC con `node build/cli.js remote autologin renew --profile udesa-docente --redeploy` (opcional: `--base-url https://<tu-remoto>` o la variable `CAMPUS_REMOTE_URL` para que el comando muestre el enlace exacto al panel). El comando primero revisa la terminal, el build, el vínculo con Vercel (`.vercel/project.json`) y la CLI `vercel`; usa la contraseña del Campus guardada en el keyring y, si no está, la pide en la terminal (oculta) sin exigir el login automático local ni guardarla. Hace UN solo login aislado como dispositivo «remoto», sin la confianza de la PC, así que el Campus manda un código al correo (no uses el enlace «no fui yo»). Antes de publicar valida la cuenta esperada y que la cookie de confianza `MFA_TOKEN_<userid>` tenga un vencimiento real con más de un día de margen. Si todo da bien, publica una sola variable sensible, `CAMPUS_WEB_BOOTSTRAP` (sobre v2 con credenciales, confianza, sesión y un `activation_epoch` monotónico), más `CAMPUS_WEB_AUTOLOGIN=true` como segunda llave, y borra las variables legacy `CAMPUS_WEB_LOGIN`, `CAMPUS_WEB_TRUST` y `CAMPUS_WEB_SESSION`. Los estados se informan por nombre y sin exagerar: `candidate_validated`, después `configuration_published_pending_deploy` (sin `--redeploy` todavía falta correr `vercel deploy --prod`) y por último `deployed_pending_verification`. La CLI nunca dice «verificado»: para eso hay que abrir `/admin/conexion` en el remoto y apretar «Activar y verificar recuperación», o usar `campus_get_status {verify: true, verify_web: true}` desde el conector MCP. Conviene hacerlo enseguida, porque la sesión publicada puede vencer por inactividad. Si el deploy falla, la configuración queda publicada pero sin desplegar, y `remote autologin deploy` repite sólo el deploy, sin pedir otro código. Si falla una carga en Vercel, en esa misma corrida se puede reintentar la publicación con la misma candidata (misma sesión, mismo epoch) sin otro código. La candidata vive sólo en memoria: si corrés el comando de nuevo, hay un login y un código nuevos. `remote autologin disable [--redeploy]` publica el sobre `{mode: "disabled"}` con un epoch mayor, deja `CAMPUS_WEB_AUTOLOGIN=false` y borra las variables legacy; la sesión abierta en el remoto sigue hasta que vence. `remote autologin status` muestra sólo el historial de publicación de esta PC (`remote-autologin.json`: epochs, fechas, vencimiento de la confianza y estado, sin secretos) y avisa cuando faltan menos de 7 días. El estado real de producción se consulta en el panel o con `campus_get_status`. Si el diagnóstico del remoto rechaza el epoch porque el reloj de la PC está atrasado, repetí `renew` con `--min-epoch <epoch aceptado>`. `remote push-web-session` quedó retirado: el remoto v2 ignora `CAMPUS_WEB_SESSION`, así que el comando se niega y explica qué usar en su lugar.
 
-**Reconocer la sesión del remoto:** en [Sesiones del navegador](https://campusvirtual.udesa.edu.ar/report/usersessions/user.php) (no tiene enlace en Preferencias), es la que tiene como última IP una de Amazon (San Pablo). La página no muestra el navegador. Recién después de `enable`, hasta que el remoto la use, figura con la IP de tu PC.
+**Reconocer la sesión del remoto:** en [Sesiones del navegador](https://campusvirtual.udesa.edu.ar/report/usersessions/user.php) (no tiene enlace en Preferencias), es la que tiene como última IP una de Amazon (San Pablo). La página no muestra el navegador.
 
-**Desactivarlo:** `node build/cli.js remote autologin disable --profile udesa-docente` y `vercel deploy --prod`. La sesión que el remoto tenga abierta se cierra con «Cerrar sesión» en su fila de Sesiones del navegador.
+**Desactivarlo:** `node build/cli.js remote autologin disable --profile udesa-docente --redeploy`. La sesión que el remoto tenga abierta sigue hasta que vence; para cortarla antes, «Cerrar sesión» en su fila de Sesiones del navegador.
 
 **Corte de emergencia:** cambiar la contraseña del Campus, que cierra todas las sesiones. Para cortar sólo la sesión del MCP: Preferencias → Sesiones del navegador (`report/usersessions/user.php`) → «Cerrar sesión» en su fila. Ahí ves todas tus sesiones con su IP y último acceso. Cambiar la contraseña no revoca los dispositivos de confianza: fijate si tu sitio permite revocarlos desde las preferencias del MFA.
 
@@ -188,7 +203,7 @@ Mientras tanto, el riesgo es el de cualquier token de la app móvil: lectura y e
 ### Cortar el acceso remoto
 
 - **Desconectar todos los clientes:** `campus remote init-secret --profile udesa-docente` + `vercel deploy --prod`.
-- **Quitarle el Campus al remoto:** borrar `CAMPUS_MOODLE_TOKEN` (y `CAMPUS_WEB_SESSION`) con `vercel env rm … production` y redesplegar.
+- **Quitarle el Campus al remoto:** `remote autologin disable --redeploy` (corta la conexión web) y borrar `CAMPUS_MOODLE_TOKEN` con `vercel env rm … production` y redesplegar.
 - **Cortar sólo las escrituras remotas:** cambiar `CAMPUS_WRITE_TOKEN_VERSION` (revoca los tokens de `/mcp-completo` y `/mcp-escritura`) o quitar `CAMPUS_WRITE_ENABLED`, y redesplegar.
 - **Cortar todo:** además, borrar la OAuth App de GitHub o pausar el proyecto en Vercel.
 

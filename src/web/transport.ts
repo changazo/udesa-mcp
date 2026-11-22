@@ -166,7 +166,7 @@ export class WebTransport {
         const snapshotUserId = op.userId;
         if (!op.rotated || snapshotUserId === null || (this.opts.source.kind !== "keyring" && this.opts.source.kind !== "kv")) return;
         const jar = op.cookies();
-        await this.opts.source.save({ v: 1, origin: this.site.origin, path_prefix: this.basePath, user_id: snapshotUserId, cookies: jar, revision: revisionOf(jar), imported_at: new Date().toISOString() });
+        await this.opts.source.save({ v: 1, origin: this.site.origin, path_prefix: this.basePath, user_id: snapshotUserId, cookies: jar, revision: revisionOf(jar), imported_at: new Date().toISOString() }, op.baseRevision);
     }
 
     /** Descarta la sesión guardada si sigue siendo la de `revision` (la que falló). */
@@ -235,6 +235,11 @@ export class WebOperation {
     baseRevision: string | null = null;
     /** Usuario verificado en esta operación (null hasta verificar). */
     userId: number | null = null;
+
+    /** Peticiones hechas (el login reanudable las suma entre el inicio y el código, ADR-141). */
+    get requestsUsed() {
+        return this.requests;
+    }
 
     constructor(
         private readonly t: WebTransport,

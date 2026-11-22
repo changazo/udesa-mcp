@@ -432,7 +432,9 @@ describe("servidor remoto: login web automático (ADR-127)", () => {
         expect(r.body.error?.code).not.toBe("AUTH_REQUIRED");
         expect(s.fake.web.requests.filter((q) => q.method === "POST" && q.path === "/login/index.php")).toHaveLength(1);
         expect(login.emails).toHaveLength(0);
-        expect(kv.data.has("web:sintetico:session")).toBe(true);
+        // ADR-141: la sesión publicada vive en el registro v2 de la conexión (cifrada), no en las claves legacy.
+        const recKey = [...kv.data.keys()].find((k) => /^conn2:[^:]+:501:[0-9a-f]{12}$/.test(k))!;
+        expect(JSON.parse(kv.data.get(recKey) as string)).toMatchObject({ schema_version: 2, auth_generation: 1, active: { session_sealed: expect.stringMatching(/^v1\./) } });
         expect(s.fake.web.requests.filter((q) => q.path === "/login/index.php").every((q) => /\(MCP del Campus; remoto\)/.test(q.userAgent ?? ""))).toBe(true);
         const st = await tool(s, tokens.access_token!, "campus_get_status", {});
         expect(st.body.data?.web_autologin ?? st.body.web_autologin).toMatchObject({ enabled: true, configured: true, disabled: null, needs_trust: null });
@@ -459,9 +461,10 @@ describe("servidor remoto: login web automático (ADR-127)", () => {
         const { tokens } = await fullLogin(s);
         const r = await tool(s, tokens.access_token!, "campus_get_quiz_structure", { course_id: 4242, quiz_id: 701 });
         expect(r.body.error.code).toBe("AUTH_REQUIRED");
-        expect(r.body.error.message).toContain("campus remote autologin enable");
-        expect(r.body.error.message).not.toMatch(/(?<!remote )autologin enable(?! \(en tu PC)/);
-        expect(r.body.error.human_action).toContain("campus remote autologin enable");
+        // ADR-141: acción tipada hacia el panel del propio servidor; nada de comandos locales ni del PC en el camino habitual.
+        expect(r.body.error.details).toMatchObject({ component: "web_session", reason: "trust_expired", recovery: { kind: "renew_web_trust", url: expect.stringMatching(/\/admin\/conexion$/), requires_human: true } });
+        expect(r.body.error.message).not.toMatch(/autologin enable/);
+        expect(r.body.error.human_action).toMatch(/\/admin\/conexion/);
         const st = await tool(s, tokens.access_token!, "campus_get_status", {});
         expect((st.body.data?.web_autologin ?? st.body.web_autologin).action_needed).toMatch(/renovar la confianza/);
     });

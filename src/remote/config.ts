@@ -1,3 +1,4 @@
+import { parseBootstrap, type WebBootstrap } from "./connection-contracts.js";
 /**
  * Configuración del modo remoto (Vercel). Todo sale de variables de entorno del proyecto; los
  * valores sensibles se cargan con `vercel env add --sensitive` y nunca se loguean.
@@ -27,6 +28,12 @@ export interface RemoteConfig {
      * CAMPUS_WEB_LOGIN (sensible). Requiere el KV (estado, candado y sesión compartidos).
      */
     autologin: { login: string; trust: string | null } | null;
+    /**
+     * Conexión web (ADR-141), leída SÓLO acá para no mezclar fuentes: el sobre de recuperación
+     * CAMPUS_WEB_BOOTSTRAP (si está, manda; inválido = error de configuración) o, sin él, lo legacy.
+     * `autologinKey` es la segunda llave CAMPUS_WEB_AUTOLOGIN=true: un sobre solo no habilita el login.
+     */
+    web: { bootstrapRaw: string | null; bootstrap: WebBootstrap | null; sessionSeed: string | null; autologinKey: boolean };
 }
 
 export type RemoteConfigResult = { ok: true; config: RemoteConfig } | { ok: false; missing: string[] };
@@ -64,7 +71,25 @@ export function readRemoteConfig(env: Record<string, string | undefined> = proce
     if (userId && !/^\d+$/.test(userId)) missing.push("CAMPUS_EXPECTED_USERID (numérico)");
     if (token && !/^[A-Za-z0-9]{16,128}$/.test(token)) missing.push("CAMPUS_MOODLE_TOKEN (formato inválido)");
     const kv = v("KV_REST_API_URL") && v("KV_REST_API_TOKEN") ? { url: v("KV_REST_API_URL")!, token: v("KV_REST_API_TOKEN")! } : null;
-    const autologin = v("CAMPUS_WEB_AUTOLOGIN") === "true" && v("CAMPUS_WEB_LOGIN") && kv ? { login: v("CAMPUS_WEB_LOGIN")!, trust: v("CAMPUS_WEB_TRUST") ?? null } : null;
+    const autologinKey = v("CAMPUS_WEB_AUTOLOGIN") === "true";
+    const bootstrapRaw = v("CAMPUS_WEB_BOOTSTRAP") ?? null;
+    let bootstrap: WebBootstrap | null = null;
+    if (bootstrapRaw && userId && /^\d+$/.test(userId)) {
+        try {
+            bootstrap = parseBootstrap(bootstrapRaw, Number(userId));
+        } catch (e) {
+            missing.push(`CAMPUS_WEB_BOOTSTRAP (${e instanceof Error ? e.message.replace(/^CAMPUS_WEB_BOOTSTRAP:?\s*/, "") : "inválido"})`);
+        }
+        if (bootstrap && !kv) missing.push("KV_REST_API_URL y KV_REST_API_TOKEN (CAMPUS_WEB_BOOTSTRAP necesita el KV)");
+    }
+    // Con sobre v2, las variables legacy no se mezclan: credenciales sólo del sobre, sin semilla de sesión aparte.
+    const autologin = bootstrap
+        ? bootstrap.mode === "enabled" && autologinKey && kv
+            ? { login: JSON.stringify(bootstrap.login), trust: JSON.stringify(bootstrap.trust) }
+            : null
+        : autologinKey && v("CAMPUS_WEB_LOGIN") && kv
+          ? { login: v("CAMPUS_WEB_LOGIN")!, trust: v("CAMPUS_WEB_TRUST") ?? null }
+          : null;
     if (missing.length) return { ok: false, missing };
     return {
         ok: true,
@@ -80,6 +105,7 @@ export function readRemoteConfig(env: Record<string, string | undefined> = proce
                     : null,
             kv,
             autologin,
+            web: { bootstrapRaw: bootstrap ? bootstrapRaw : null, bootstrap, sessionSeed: bootstrap ? null : (v("CAMPUS_WEB_SESSION") ?? null), autologinKey },
         },
     };
 }

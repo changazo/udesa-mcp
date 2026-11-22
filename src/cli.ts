@@ -14,7 +14,7 @@ import { spawn } from "node:child_process";
 import { buildCapabilityReport } from "./capabilities/report.js";
 import { promptHidden, promptVisible, requireTty } from "./cli/prompt.js";
 import { webAutologinCommand, wireAutoLogin } from "./cli/web-autologin.js";
-import { remoteAutologinCommand } from "./cli/remote-autologin.js";
+import { pushWebSessionRefusal, remoteAutologinCommand } from "./cli/remote-autologin.js";
 import { loadProfile, type Profile } from "./config/profile.js";
 import { CampusError, toPublicError } from "./errors.js";
 import { defaultStateDir, FileMetadataStore } from "./session/metadata.js";
@@ -52,8 +52,12 @@ Servidor remoto privado (Vercel, ver docs/REMOTO_VERCEL.md):
   campus remote configure  --profile <id> --base-url <https://…> --github-client-id <id> --github-user-id <n>
   campus remote init-secret --profile <id>      # genera OAUTH_SIGNING_SECRET (rotarlo revoca todos los tokens)
   campus remote push-token  --profile <id>      # copia el token Moodle del keyring al proyecto Vercel
-  campus remote push-web-session --profile <id> # valida y publica la sesión web local como CAMPUS_WEB_SESSION (sensible)
-  campus remote autologin enable|disable|status --profile <id>   # login web automático en Vercel (ADR-127): reusa la contraseña de esta PC y pide un código
+  campus remote autologin renew --profile <id> [--redeploy] [--base-url <https://…>] [--min-epoch <n>]   # recuperación desde la PC (ADR-141): un login con código, publica CAMPUS_WEB_BOOTSTRAP; verificá en /admin/conexion
+  campus remote autologin enable --profile <id>    # nombre anterior de renew (sin desplegar)
+  campus remote autologin disable --profile <id> [--redeploy]   # publica el sobre disabled y CAMPUS_WEB_AUTOLOGIN=false
+  campus remote autologin deploy --profile <id>    # reintenta sólo vercel deploy --prod tras una publicación sin desplegar (sin otro código)
+  campus remote autologin status --profile <id>    # historial de publicación desde esta PC (el estado vivo: campus_get_status o el panel)
+  campus remote push-web-session --profile <id> # RETIRADO (ADR-141): renová desde el panel /admin/conexion o con remote autologin renew --redeploy
 
 Escrituras (perfil de escritura, p. ej. udesa-docente-escritura; ver docs/PROCESOS.md#escrituras):
   campus serve-full    --profile docente-completo   # UN servidor MCP con lecturas + escrituras (ADR-062); exige CAMPUS_WRITE_ENABLED=true
@@ -96,6 +100,8 @@ async function main(argv: string[]): Promise<number> {
             every: { type: "string" },
             quiet: { type: "boolean" },
             since: { type: "string" },
+            redeploy: { type: "boolean" },
+            "min-epoch": { type: "string" },
             help: { type: "boolean", short: "h" },
         },
     });
@@ -208,20 +214,10 @@ async function main(argv: string[]): Promise<number> {
             return 0;
         }
         case "remote autologin":
-            return remoteAutologinCommand(arg, { profile, app, secrets: new KeyringSecretStore(), metadata, logger });
-        case "remote push-web-session": {
-            if (!app.web) throw new CampusError("CONFIG_INVALID", "Sesión web no disponible.");
-            // Se valida identidad y vigencia antes de publicar; una rotación validada se persiste primero.
-            const op = await app.web.open();
-            await app.web.afterOperation(op);
-            const snap = await webSource.load();
-            if (!snap) throw new CampusError("AUTH_REQUIRED", "No hay sesión web local para publicar.");
-            await vercelEnvAdd("CAMPUS_WEB_SESSION", encodeSnapshot(snap), { sensitive: true });
-            recordPublished(metadata, snap.revision, new Date());
-            out(`Sesión web validada (userid ${snap.user_id}, revisión ${snap.revision}) y cargada como CAMPUS_WEB_SESSION sensible (no se muestra). Aplicala con: vercel deploy --prod`);
-            out("Cada invocación remota parte de ese snapshot. Si el Campus rota o cierra la sesión, hay que volver a importarla y publicarla. Para que no venza por inactividad: campus auth web keepalive.");
-            return 0;
-        }
+            return remoteAutologinCommand(arg, { profile, app, secrets: new KeyringSecretStore(), metadata, logger }, { redeploy: !!values.redeploy, baseUrl: values["base-url"], minEpoch: values["min-epoch"] });
+        case "remote push-web-session":
+            // Retirado en ADR-141: el remoto v2 ignora CAMPUS_WEB_SESSION; se rechaza con la instrucción precisa.
+            return pushWebSessionRefusal(profile.profile_id);
         default:
             err(`Comando desconocido: ${positionals.join(" ")}\n\n${USAGE}`);
             return 2;
@@ -409,7 +405,7 @@ async function authWeb(action: string | undefined, app: App, source: WebSessionS
         out(`Sesión web validada y guardada en el almacén seguro: userid ${snapshot.user_id}, ${snapshot.cookies.length} cookie(s) de Moodle, revisión ${snapshot.revision}.`);
         out("Dura lo que dure esa sesión en el Campus: vence por inactividad o si cerrás sesión en ese navegador. Para mantenerla viva: campus auth web keepalive.");
         const state = readWebState(metadata);
-        if (state.published_revision && state.published_revision !== snapshot.revision) out("El remoto tiene otra sesión publicada: si lo usás, corré campus remote push-web-session y vercel deploy --prod.");
+        if (state.published_revision && state.published_revision !== snapshot.revision) out("El remoto tiene su propia conexión web (ADR-141): se renueva desde su panel /admin/conexion, no desde esta PC.");
         return 0;
     }
     if (action === "status") {
@@ -479,7 +475,7 @@ async function keepaliveOnce(web: NonNullable<App["web"]>, metadata: MetadataSto
             for (const w of c.warnings) err(`Aviso: ${w}`);
         }
         if (remoteInSync(state, c.revision) === false) {
-            err("La cookie local cambió desde la última publicación: el remoto usa otra. Corré campus remote push-web-session y vercel deploy --prod.");
+            err("La cookie local cambió. El remoto tiene su propia conexión web (ADR-141): se renueva desde su panel /admin/conexion.");
         }
         return 0;
     } catch (e) {

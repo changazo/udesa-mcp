@@ -92,8 +92,8 @@ describe("login web con contraseña y MFA (ADR-088)", () => {
 
     it("código equivocado o mal formado: un solo intento", async () => {
         const s = await setup();
-        expect(await codeOf(passwordLogin(s.web, { username: LOGIN_USER, password: LOGIN_PASSWORD, remembered: [], askCode: async () => "12345" }))).toBe("AUTH_REJECTED");
-        expect(s.login.failedCodes).toBe(0); // no se envió: no eran 6 dígitos
+        expect(await codeOf(passwordLogin(s.web, { username: LOGIN_USER, password: LOGIN_PASSWORD, remembered: [], askCode: async () => "12345" }))).toBe("AUTH_REQUIRED");
+        expect(s.login.failedCodes).toBe(0); // no se envió: no eran 6 dígitos (validación, no credencial rechazada; ADR-141)
         expect(await codeOf(passwordLogin(s.web, { username: LOGIN_USER, password: LOGIN_PASSWORD, remembered: [], askCode: async () => "999999" }))).toBe("AUTH_REJECTED");
         expect(s.login.failedCodes).toBe(1);
     });

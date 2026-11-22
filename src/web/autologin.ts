@@ -71,6 +71,16 @@ export interface AutoLoginBackend {
     lock(): Promise<() => Promise<void> | void>;
     /** Qué hacer para volver a cargar la contraseña o renovar la confianza. */
     readonly renewHint: string;
+    /**
+     * Remoto (ADR-141): antes de cualquier intento, frena con un error tipado si hay una renovación en
+     * curso, una activación pendiente o un conflicto de configuración. Sin efectos.
+     */
+    preflight?(): Promise<void>;
+    /**
+     * Remoto (ADR-141): publica sesión y confianza nuevas en UNA transición atómica (con generación nueva),
+     * en lugar de guardarlas por separado. Sin este método, se guardan como siempre.
+     */
+    publish?(r: LoginResult): Promise<void>;
 }
 
 export function readAutoLoginState(store: MetadataStore): AutoLoginState {
@@ -207,6 +217,7 @@ export class AutoLogin implements WebAutoLogin {
 
     private async attempt(): Promise<WebSessionSnapshot> {
         const b = this.backend;
+        await b.preflight?.();
         const state = await b.readState();
         const nowMs = this.now().getTime();
         const at = this.now().toISOString();
@@ -247,8 +258,11 @@ export class AutoLogin implements WebAutoLogin {
         await b.writeState({ ...state, attempts: [...recent, at], inflight: { at } });
         try {
             const r = await passwordLogin(this.d.transport, { username: creds.username, password: creds.password, remembered: trust, askCode: this.d.askCode, now: this.now, deadlineMs: this.d.deadlineMs });
-            await this.d.transport.saveSnapshot(r.snapshot);
-            await b.saveTrust(r.remembered);
+            if (b.publish) await b.publish(r);
+            else {
+                await this.d.transport.saveSnapshot(r.snapshot);
+                await b.saveTrust(r.remembered);
+            }
             const s = await b.readState();
             await b.writeState({
                 ...s,

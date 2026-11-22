@@ -133,7 +133,7 @@ describe("login automático remoto (ADR-127)", () => {
         const r = await remote({ trust: "none" });
         const e = await r.a.web.open().catch((x) => x);
         expect(e.code).toBe("AUTH_REQUIRED");
-        expect(e.humanAction).toMatch(/remote autologin enable/);
+        expect(e.humanAction).toMatch(/\/admin\/conexion/);
         expect(loginPosts(r.h)).toBe(1); // sólo la puesta en marcha
         expect(r.login.emails.length).toBe(r.emailsAtStart);
         expect((await autoLoginStatus(r.a.backend)).needs_trust).not.toBeNull();
