@@ -21,7 +21,7 @@ En los ejemplos, `https://<tu-proyecto>.vercel.app` es el dominio de producción
 | claude.ai | Sin probar: en un plan Team sólo un Owner agrega conectores (ver [abajo](#claudeai)) |
 | MCP local por STDIO (sin Vercel) | Funciona: [CONFIGURACION_LOCAL.md](CONFIGURACION_LOCAL.md) |
 
-Cada computadora tiene su propio keyring: el login, la sesión web y, si se activa, la contraseña del login automático se cargan **en cada una**. El remoto (Vercel) es independiente de todas: tiene su propia sesión web y, con el [login web automático remoto](PROCESOS.md#login-web-automático-en-el-remoto) (ADR-127), su propio dispositivo de confianza, que se renueva cada 28 días desde una computadora con el repo, con `remote autologin enable` y un deploy.
+Cada computadora tiene su propio keyring: el login, la sesión web y, si se activa, la contraseña del login automático se cargan **en cada una**. El remoto (Vercel) es independiente de todas: tiene su propia sesión web y, con el [login web automático remoto](PROCESOS.md#login-web-automático-en-el-remoto) (ADR-127), su propio dispositivo de confianza, que dura 28 días y se renueva desde cualquier navegador, en el panel privado `https://<tu-proyecto>.vercel.app/admin/conexion` (ADR-141); el vencimiento vigente lo muestran el panel y `campus_get_status`.
 
 ## Cómo es cada conexión
 

@@ -54,31 +54,9 @@ Cuándo: `AUTH_REQUIRED` generalizado, o después de una revocación.
    node build/cli.js remote push-token --profile udesa-docente
    ```
 
-El panel muestra hasta cuándo vale la confianza, en hora de Argentina, y cuánto falta. `campus_get_status` avisa desde **7 días antes** (`connection.device_trust.state = "expiring"` y `web_autologin.action_needed`), con el enlace al panel en `connection.action`.
-
-**Si algo no sale:**
-- **«No recibí el código»:** revisá spam y esperá un par de minutos. Si no llega, «Cancelar» y volvé a iniciar cuando termine la pausa (10 minutos después de un intento fallido; 2 minutos después de uno correcto).
-- **«El Campus no aceptó el código»:** puede ser incorrecto o haber vencido (vale 10 minutos). Iniciá otra renovación cuando termine la pausa.
-- **«No pudimos confirmar el resultado del intento»:** hubo un corte justo después de enviar la contraseña o el código. El servidor **no reenvía nada solo**. Revisá tus [sesiones del navegador](https://campusvirtual.udesa.edu.ar/report/usersessions/user.php) y, si querés, apretá «Iniciar otra renovación».
-- **«La renovación quedó guardada. No pudimos comprobar la conexión»:** la renovación está publicada; repetí sólo «Comprobar conexión» (no pide otro código).
-- **Límites:** hasta 6 intentos por día, compartidos con el login automático; el panel dice desde qué hora se puede volver a intentar.
-- Contraseña rechazada, configuración incompleta o en conflicto, token de la API inválido u otra cuenta: el panel no lo puede resolver y pide la recuperación desde la PC (abajo).
-
-### Síntomas por capa
-
-`campus_get_status` en el remoto devuelve `connection` con una capa por credencial y la fecha de su evidencia:
-
-| Capa | Qué es | Si falla |
-|---|---|---|
-| `api_token` | Token móvil de Moodle (`CAMPUS_MOODLE_TOKEN`) | [Renovar el token móvil](#renovar-el-token-móvil) y `remote push-token` + deploy |
-| `web_session` | Sesión web publicada en el KV | La renueva el login automático; si no puede, el panel |
-| `device_trust` | Confianza del dispositivo del remoto (28 días) | Panel (`renew_web_trust`) |
-| `persistence` | Registro cifrado de la conexión en el KV | Esperar; si sigue, recuperación desde la PC |
-| `renewal` / `activation` | Renovación en curso o recuperación pendiente de activar | Esperar o «Activar y verificar recuperación» en el panel |
-
-Un `AUTH_REQUIRED` de la sesión web trae `details.recovery.kind`: `renew_web_trust` o `activate_recovery` (abrir el panel, con la URL en `details.recovery.url`), `review_attempt` (intento incierto: revisar antes de rearmar), `wait` (renovación en curso, pausa o KV) o `cli_recovery` (recuperación desde la PC).
-
-**Uso:** cuando una herramienta remota necesita la sesión web y está vencida, el servidor inicia sesión solo, sin código, mientras la confianza esté vigente. Las guardas son las mismas que en el local: un rechazo de contraseña lo desactiva, y hay pausas y un máximo de 6 intentos por día.
+   ```bash
+   vercel deploy --prod
+   ```
 
 Moodle suele devolver **el mismo** token si el anterior sigue vigente. En ese caso el remoto no necesita cambios. `push-token` valida el token contra Moodle antes de subirlo.
 
@@ -126,62 +104,6 @@ node build/cli.js auth web keepalive install --profile udesa-docente
 - Si movés el proyecto o cambia la instalación de Node, `status` lo avisa: reinstalala. Si usás `--profile-file` o un directorio de estado propio (`--state-dir` o `CAMPUS_STATE_DIR`), instalala con los mismos: la tarea los repite (ADR-106).
 - Una sesión que no vence alarga la exposición si la cookie se filtra. El corte de emergencia es el mismo: [Cerrar sesión en el navegador de origen](#cookie-de-sesión-web-expuesta).
 - **En PCs administradas (cuenta de dominio, sin administrador, con antivirus corporativo) la tarea puede no funcionar:** `conhost --headless` puede terminar sin lanzar Node, y una variante con `wscript.exe` puede desaparecer por el antivirus (ADR-087). Si en tu PC no podés programar tareas, la alternativa es el [login web automático](#login-web-automático-en-la-pc-recomendado).
-
-Es el **método recomendado** para la sesión web en la PC (ADR-142, decisión del dueño; antes era opcional y no recomendado, ADR-088). Guarda tu contraseña del Campus en el Administrador de credenciales, y con ella el **MCP local** inicia sesión en la web solo cuando la sesión venció. Para el remoto (Vercel): [Login web automático en el remoto](#login-web-automático-en-el-remoto).
-
-La sesión, la confianza del dispositivo, los intentos y las renovaciones viven en **un** registro de esta PC (`web-connection.json` en el directorio del perfil, cifrado con la clave `…|web_connection_box` del Administrador de credenciales). Lo comparten todos los procesos locales (`serve`, `serve-full`, la CLI y la tarea de keepalive): dos procesos con la sesión vencida hacen **un** solo login. Es el mismo modelo que el remoto (ADR-141).
-
-1. **Puesta en marcha**, una vez, en tu terminal. Pide usuario, contraseña y el código que el Campus te manda al correo. La PC queda como **dispositivo de confianza** (en UdeSA, 28 días):
-
-   ```bash
-   node build/cli.js auth web autologin enable --profile udesa-docente
-   ```
-
-2. **Segunda llave:** agregá `CAMPUS_WEB_AUTOLOGIN=true` a la entrada del cliente MCP (`udesa-campus` y, si la usás, `udesa-campus-completo`) y abrí una sesión nueva. Sin la variable, los servidores no usan la contraseña.
-3. **Uso:**
-   - Cuando una herramienta necesita la sesión web y está vencida, el servidor inicia sesión solo y sigue.
-   - Cuando vence la confianza del dispositivo, abre un **diálogo de Windows** para el código del correo. No lo escribas en el chat.
-   - Si el diálogo no abre, la herramienta devuelve `AUTH_REQUIRED` con el comando del panel local: renová con el paso 4.
-
-4. **Renovar la confianza (cada ~28 días, o antes):** el panel de conexión de esta PC.
-
-   ```bash
-   node build/cli.js auth web panel --profile udesa-docente
-   ```
-
-   - Abre tu navegador en `http://127.0.0.1:<puerto>/<secreto>/conexion`. Sólo responde en esta PC; el secreto de la dirección es la llave mientras está abierto: no lo compartas.
-   - Los pasos son los del remoto: «Enviar código y renovar», escribir el código del correo en el panel y «Confirmar y verificar». Termina con una comprobación automática.
-   - El panel **nunca pide la contraseña**: si no hay login automático, muestra el comando de la terminal.
-   - Se cierra solo después de una renovación verificada, a los 15 minutos sin uso o con Ctrl+C. Con `--no-open` sólo muestra el enlace.
-   - También se puede renovar desde la terminal, repitiendo el paso 1.
-
-**Estado, vencimiento de la confianza e intentos:** `auth web autologin status --profile udesa-docente`, o `campus_get_status` (`connection`, con `mode: "local"`). El aviso llega 7 días antes del vencimiento.
-
-### Síntomas por capa en la PC
-
-| `campus_get_status` → `connection` | Qué pasa | Qué hacer |
-|---|---|---|
-| `method: "none"`, `action.kind: enable_local_autologin` | La PC no tiene sesión web ni login automático | `auth web autologin enable` (recomendado) o, como respaldo, `auth web import --clipboard` |
-| `method: "cookie"`, `web_session.estimated_expires_if_idle_at` cerca | Cookie importada a punto de vencer por inactividad | Usarla o activar el login automático para no reimportarla |
-| `device_trust.state: expiring` o `expired`, `action.kind: renew_local_trust` | La confianza del dispositivo vence o venció | `auth web panel` (o el diálogo, si lo ofrece el servidor) |
-| `renewal.state: uncertain`, `action.kind: review_attempt` | Un intento quedó sin resultado confirmado | Revisá Sesiones del navegador en el Campus; el panel ofrece «Iniciar otra renovación». Nunca se reenvía solo |
-| `persistence.state: failed` (`kv_unavailable`) | El archivo de la conexión está dañado o tomado | No se pisa solo. Revisá `web-connection.json`; para empezar de cero, movelo de lugar y repetí `auth web autologin enable` |
-| `persistence.state: failed` (`config_conflict`) | Se perdió la clave de cifrado del Administrador de credenciales | Repetí `auth web autologin enable` |
-
-**Guardas:**
-- Si el Campus rechaza la contraseña o el código, el login automático se **desactiva**. Nunca reintenta, porque cada fallo suma al bloqueo de la cuenta.
-- Pausa de 10 minutos después de un intento fallido y de 2 minutos después de uno exitoso; a lo sumo 6 intentos en 24 horas, contando juntos el panel, la terminal y todos los procesos de la PC.
-- Si aparece un captcha, otro factor, un cambio de contraseña forzado o políticas pendientes, se detiene y lo dice.
-
-**Registro:** cada login queda registrado en el Campus (evento de inicio de sesión y último acceso).
-
-**Desactivarlo:** `auth web autologin disable --profile udesa-docente` borra la contraseña y la confianza. La sesión abierta sigue hasta que vence.
-
-**Migración (una sola vez):** la primera vez que corre la versión con ADR-142, adopta la cookie y la confianza del keyring y el estado de `web-autologin.json` sin iniciar sesión; el archivo viejo queda como `web-autologin.json.migrated`. Para volver a una versión anterior: renombrarlo de nuevo a `web-autologin.json` y repetir `enable`. Después de actualizar, reiniciá los clientes MCP para que ningún servidor viejo siga escribiendo el estado anterior.
-
-**Correos con código:** cuando el MCP necesita el código, te llega el correo de siempre. Escribí el código en el panel, en el diálogo o en la terminal con `enable`. **No uses el enlace del correo para avisar que no fuiste vos:** revoca el factor correo de toda la cuenta, cierra todas tus sesiones y puede suspender la cuenta. Usalo sólo si de verdad no fuiste vos.
-
-**Cambiar la contraseña del Campus** con el login automático activo: primero `auth web autologin disable` en cada computadora donde esté activo y `remote autologin disable` + deploy si está en el remoto; después cambiala; después `enable` de nuevo en cada lugar. Así no se juntan rechazos que acerquen la cuenta al bloqueo.
 
 ## Login web automático en la PC (recomendado)
 
@@ -252,9 +174,31 @@ Con esto, el servidor de Vercel (ChatGPT, Codex o Claude remotos) inicia sesión
 3. Escribí el código de seis dígitos **en el panel** (nunca en el chat) y apretá **«Confirmar y verificar»**. El panel publica la sesión y la confianza nuevas y comprueba solo la API, la sesión web, la identidad y la confianza. Termina con «Conexión renovada y verificada» o dice qué capa falló.
 4. Desde el chat, el agente lo confirma con `campus_get_status({verify: true, verify_web: true})`.
 
-   ```bash
-   vercel deploy --prod
-   ```
+El panel muestra hasta cuándo vale la confianza, en hora de Argentina, y cuánto falta. `campus_get_status` avisa desde **7 días antes** (`connection.device_trust.state = "expiring"` y `web_autologin.action_needed`), con el enlace al panel en `connection.action`.
+
+**Si algo no sale:**
+- **«No recibí el código»:** revisá spam y esperá un par de minutos. Si no llega, «Cancelar» y volvé a iniciar cuando termine la pausa (10 minutos después de un intento fallido; 2 minutos después de uno correcto).
+- **«El Campus no aceptó el código»:** puede ser incorrecto o haber vencido (vale 10 minutos). Iniciá otra renovación cuando termine la pausa.
+- **«No pudimos confirmar el resultado del intento»:** hubo un corte justo después de enviar la contraseña o el código. El servidor **no reenvía nada solo**. Revisá tus [sesiones del navegador](https://campusvirtual.udesa.edu.ar/report/usersessions/user.php) y, si querés, apretá «Iniciar otra renovación».
+- **«La renovación quedó guardada. No pudimos comprobar la conexión»:** la renovación está publicada; repetí sólo «Comprobar conexión» (no pide otro código).
+- **Límites:** hasta 6 intentos por día, compartidos con el login automático; el panel dice desde qué hora se puede volver a intentar.
+- Contraseña rechazada, configuración incompleta o en conflicto, token de la API inválido u otra cuenta: el panel no lo puede resolver y pide la recuperación desde la PC (abajo).
+
+### Síntomas por capa
+
+`campus_get_status` en el remoto devuelve `connection` con una capa por credencial y la fecha de su evidencia:
+
+| Capa | Qué es | Si falla |
+|---|---|---|
+| `api_token` | Token móvil de Moodle (`CAMPUS_MOODLE_TOKEN`) | [Renovar el token móvil](#renovar-el-token-móvil) y `remote push-token` + deploy |
+| `web_session` | Sesión web publicada en el KV | La renueva el login automático; si no puede, el panel |
+| `device_trust` | Confianza del dispositivo del remoto (28 días) | Panel (`renew_web_trust`) |
+| `persistence` | Registro cifrado de la conexión en el KV | Esperar; si sigue, recuperación desde la PC |
+| `renewal` / `activation` | Renovación en curso o recuperación pendiente de activar | Esperar o «Activar y verificar recuperación» en el panel |
+
+Un `AUTH_REQUIRED` de la sesión web trae `details.recovery.kind`: `renew_web_trust` o `activate_recovery` (abrir el panel, con la URL en `details.recovery.url`), `review_attempt` (intento incierto: revisar antes de rearmar), `wait` (renovación en curso, pausa o KV) o `cli_recovery` (recuperación desde la PC).
+
+**Uso:** cuando una herramienta remota necesita la sesión web y está vencida, el servidor inicia sesión solo, sin código, mientras la confianza esté vigente. Las guardas son las mismas que en el local: un rechazo de contraseña lo desactiva, y hay pausas y un máximo de 6 intentos por día.
 
 ### Recuperación desde la PC (CLI, ADR-141)
 
